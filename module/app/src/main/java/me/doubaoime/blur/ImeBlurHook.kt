@@ -11,6 +11,9 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.RenderEffect
+import android.graphics.RenderNode
+import android.graphics.Shader
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -194,7 +197,7 @@ internal object ImeBlurHook {
             val right = (bounds.right.toInt() + 8).coerceIn(left + 1, bitmap.width)
             val bottom = (bounds.bottom.toInt() + 8).coerceIn(top + 1, bitmap.height)
             val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-            blurBitmap(source, 5, 3)
+            if (!blurBitmapSystem(source, 18f)) blurBitmap(source, 5, 3)
             canvas.save()
             canvas.clipPath(path)
             canvas.drawBitmap(source, left.toFloat(), top.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
@@ -203,6 +206,27 @@ internal object ImeBlurHook {
             module.log(Log.INFO, TAG, "blurred long-press backdrop ${right - left}x${bottom - top}")
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "long-press backdrop blur skipped: $t")
+        }
+    }
+
+    private fun blurBitmapSystem(bitmap: Bitmap, radius: Float): Boolean {
+        if (Build.VERSION.SDK_INT < 31) return false
+        return try {
+            val node = RenderNode("doubao-bubble-blur")
+            node.setPosition(0, 0, bitmap.width, bitmap.height)
+            node.setRenderEffect(RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP))
+            val recording = node.beginRecording(bitmap.width, bitmap.height)
+            recording.drawBitmap(bitmap, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG))
+            node.endRecording()
+            val method = Class.forName("android.graphics.HardwareRenderer").getDeclaredMethod(
+                "createHardwareBitmap", RenderNode::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
+            ).apply { isAccessible = true }
+            val blurred = method.invoke(null, node, bitmap.width, bitmap.height) as? Bitmap ?: return false
+            Canvas(bitmap).drawBitmap(blurred, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG))
+            blurred.recycle()
+            true
+        } catch (_: Throwable) {
+            false
         }
     }
 
