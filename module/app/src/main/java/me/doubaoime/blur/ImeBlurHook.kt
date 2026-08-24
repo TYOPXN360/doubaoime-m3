@@ -111,10 +111,15 @@ internal object ImeBlurHook {
         val g = Color.green(original)
         val b = Color.blue(original)
         val dark = Resources.getSystem().configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val average = (r + g + b) / 3
         val role = when {
             b > r + 20 && b > g + 10 -> if (dark) "system_accent1_700" else "system_accent1_600"
-            maxOf(r, g, b) - minOf(r, g, b) < 24 -> if (dark) "system_neutral2_800" else "system_neutral2_100"
-            else -> if (dark) "system_neutral1_800" else "system_neutral1_100"
+            average < 225 -> if (dark) "system_neutral2_700" else "system_neutral2_200"
+            else -> "neutral_key"
+        }
+        if (role == "neutral_key") {
+            val base = if (dark) 0xff707070.toInt() else 0xffd0d0d0.toInt()
+            return (base and 0x00ffffff) or (0x99 shl 24)
         }
         val id = Resources.getSystem().getIdentifier(role, "color", "android")
         val base = if (id == 0) original else Resources.getSystem().getColor(id)
