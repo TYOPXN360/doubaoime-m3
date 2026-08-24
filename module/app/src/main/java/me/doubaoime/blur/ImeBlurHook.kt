@@ -40,11 +40,50 @@ internal object ImeBlurHook {
             hookKeyboardViewTouchBubble(module, loader)
             hookToolbarPageBlur(module, loader)
             hookToolboxKeyboardView(module, loader)
+            hookToolboxItemView(module, loader)
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
         }
         hookCreateInputView(module, imeService)
         hookStartInputView(module, imeService)
+        hookInputViewRootToolboxProbe(module, loader)
+    }
+
+    private fun hookInputViewRootToolboxProbe(module: XposedModule, loader: ClassLoader) {
+        val rootClass = loader.loadClass("com.bytedance.android.input.keyboard.areacontrol.InputViewRoot")
+        val method = rootClass.getDeclaredMethod("m2", Boolean::class.javaPrimitiveType, String::class.java).apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                if (chain.getArg(0) == true) {
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        try {
+                            val field = rootClass.getDeclaredField("X0").apply { isAccessible = true }
+                            val toolbox = field.get(chain.thisObject) as? View
+                            if (toolbox != null) {
+                                applyToolboxSurface(toolbox, module)
+                                dumpToolboxTree(toolbox, module, 0)
+                            } else {
+                                module.log(Log.WARN, TAG, "toolbox probe: X0 is null")
+                            }
+                        } catch (t: Throwable) {
+                            module.log(Log.WARN, TAG, "toolbox probe failed: $t")
+                        }
+                    }, 250)
+                }
+                result
+            }
+        module.log(Log.INFO, TAG, "InputViewRoot toolbox probe installed")
+    }
+
+    private fun dumpToolboxTree(view: View, module: XposedModule, depth: Int) {
+        if (depth > 3) return
+        val background = view.background
+        module.log(Log.INFO, TAG, "toolbox[$depth] ${view.javaClass.name} id=${view.id} visible=${view.visibility} size=${view.width}x${view.height} bg=${background?.javaClass?.name} color=${(background as? ColorDrawable)?.color}")
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) dumpToolboxTree(view.getChildAt(i), module, depth + 1)
+        }
     }
 
     private fun hookCreateInputView(module: XposedModule, imeService: Class<*>) {
@@ -210,9 +249,45 @@ internal object ImeBlurHook {
                 applyToolboxSurface(chain.thisObject as View, module)
                 result
             }
-        module.log(Log.INFO, TAG, "ToolboxKeyboardView surface hook installed")
+        val attached = toolbox.getDeclaredMethod("onAttachedToWindow").apply { isAccessible = true }
+        module.hook(attached)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                applyToolboxSurface(chain.thisObject as View, module)
+                result
+            }
+        module.log(Log.INFO, TAG, "ToolboxKeyboardView attach blur hook installed")
     }
 
+    private fun hookToolboxItemView(module: XposedModule, loader: ClassLoader) {
+        val item = loader.loadClass("com.bytedance.common_biz.tool_box.ToolboxItemView")
+        val method = item.getDeclaredMethod("d").apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                applyToolboxItemSurface(chain.thisObject as View, module)
+                result
+            }
+        module.log(Log.INFO, TAG, "ToolboxItemView surface hook installed")
+    }
+
+    private fun applyToolboxItemSurface(view: View, module: XposedModule) {
+        val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val raw = monetColor(view, if (dark) "system_neutral1_700" else "system_neutral1_100")
+        val color = (if (raw == 0) {
+            if (dark) 0xff454746.toInt() else 0xffe1e3e1.toInt()
+        } else raw) and 0x00ffffff or (0x99 shl 24)
+        val background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = view.resources.displayMetrics.density * 14f
+            setColor(color)
+        }
+        val id = view.resources.getIdentifier("toolbox_item_content", "id", view.context.packageName)
+        view.findViewById<View>(id)?.background = background
+        module.log(Log.INFO, TAG, "applied toolbox item surface dark=$dark")
+    }
     private fun applyToolboxSurface(root: View, module: XposedModule) {
         val dark = root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         val suffix = if (dark) "800" else "100"
