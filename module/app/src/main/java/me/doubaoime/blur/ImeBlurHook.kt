@@ -7,6 +7,7 @@ import android.content.res.Resources
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.os.Build
 import android.os.Handler
@@ -178,7 +179,7 @@ internal object ImeBlurHook {
             .intercept { chain ->
                 val result = chain.proceed()
                 val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(result) as? View
-                itemView?.postDelayed({ applyBlurToPopupRoot(itemView, module) }, 40)
+                itemView?.postDelayed({ applyToolbarPageSurface(itemView, module) }, 40)
                 result
             }
         val bind = adapter.getDeclaredMethod("onBindViewHolder", holder, Int::class.javaPrimitiveType)
@@ -188,7 +189,7 @@ internal object ImeBlurHook {
             .intercept { chain ->
                 val result = chain.proceed()
                 val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(chain.getArg(0)) as? View
-                itemView?.postDelayed({ applyBlurToPopupRoot(itemView, module) }, 40)
+                itemView?.postDelayed({ applyToolbarPageSurface(itemView, module) }, 40)
                 result
             }
         module.log(Log.INFO, TAG, "ToolbarPagerAdapter bind blur hook installed")
@@ -209,6 +210,24 @@ internal object ImeBlurHook {
                 result
             }
         module.log(Log.INFO, TAG, "WindowManager popup blur hook installed")
+    }
+
+    private fun applyToolbarPageSurface(root: View, module: XposedModule) {
+        val dark = root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val suffix = if (dark) "800" else "100"
+        val raw = monetColor(root, "system_accent1_$suffix")
+        val color = if (raw == 0) {
+            if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
+        } else {
+            (raw and 0x00ffffff) or (0x99 shl 24)
+        }
+        val surface = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = root.resources.displayMetrics.density * 16f
+            setColor(color)
+        }
+        root.background = surface
+        module.log(Log.INFO, TAG, "applied toolbar Monet surface ${root.width}x${root.height} dark=$dark")
     }
 
     private fun applyBlurToPopupRoot(root: View, module: XposedModule) {
