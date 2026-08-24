@@ -183,10 +183,12 @@ internal object ImeBlurHook {
             val bitmap = view.javaClass.getDeclaredField("mBitmapBuffer").apply { isAccessible = true }.get(view) as? Bitmap ?: return
             val canvas = view.javaClass.getDeclaredField("mCurrentCanvas").apply { isAccessible = true }.get(view) as? Canvas ?: return
             val values = args.take(10).map { it as Float }
-            val left = values.minOrNull()!!.toInt().coerceIn(0, bitmap.width - 1)
-            val top = values.minOrNull()!!.toInt().coerceIn(0, bitmap.height - 1)
-            val right = values.maxOrNull()!!.toInt().coerceIn(left + 1, bitmap.width)
-            val bottom = values.maxOrNull()!!.toInt().coerceIn(top + 1, bitmap.height)
+            val xs = listOf(values[0], values[2], values[4], values[6], values[8])
+            val ys = listOf(values[1], values[3], values[5], values[7], values[9])
+            val left = (xs.minOrNull()!!.toInt() - 4).coerceIn(0, bitmap.width - 1)
+            val top = (ys.minOrNull()!!.toInt() - 4).coerceIn(0, bitmap.height - 1)
+            val right = (xs.maxOrNull()!!.toInt() + 4).coerceIn(left + 1, bitmap.width)
+            val bottom = (ys.maxOrNull()!!.toInt() + 4).coerceIn(top + 1, bitmap.height)
             val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
             blurBitmap(source, 7)
             canvas.save()
@@ -204,12 +206,21 @@ internal object ImeBlurHook {
         val width = bitmap.width
         val height = bitmap.height
         val input = IntArray(width * height)
+        val horizontal = IntArray(input.size)
         val output = IntArray(input.size)
         bitmap.getPixels(input, 0, width, 0, 0, width, height)
         for (y in 0 until height) for (x in 0 until width) {
             var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
-            for (dy in -radius..radius) for (dx in -radius..radius) {
-                val color = input[(y + dy).coerceIn(0, height - 1) * width + (x + dx).coerceIn(0, width - 1)]
+            for (dx in -radius..radius) {
+                val color = input[y * width + (x + dx).coerceIn(0, width - 1)]
+                aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
+            }
+            horizontal[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
+        }
+        for (y in 0 until height) for (x in 0 until width) {
+            var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
+            for (dy in -radius..radius) {
+                val color = horizontal[(y + dy).coerceIn(0, height - 1) * width + x]
                 aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
             }
             output[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
@@ -425,7 +436,7 @@ internal object ImeBlurHook {
         val system = Resources.getSystem()
         val id = system.getIdentifier(name, "color", "android")
         val base = if (id == 0) original else system.getColor(id)
-        return (base and 0x00ffffff) or (0xb8 shl 24)
+        return (base and 0x00ffffff) or (0x88 shl 24)
     }
 
     private fun translucentGboardKeyColor(original: Int, resources: Resources): Int {
