@@ -23,8 +23,8 @@ SHA-256 记录在 `analysis/diff/sample-sha256.txt`。
 `module/` 是独立的 LibXposed API 102 Android 模块，目标包仅为 `com.bytedance.android.doubaoime`。实现位于 `ImeBlurHook.java`：
 
 - hook `ImeService.onStartInputView(EditorInfo, boolean)`，并在 `onCreate()` 作为兜底；
-- Android 12+ 反射 `ViewRootImpl.createBackgroundBlurDrawable()`；
-- 应用确认过的默认半径：竖屏 20、横屏 20、圆角 0；
+- 对 `ImeService.getInputView()` 返回的键盘根视图设置 Android 12+ `RenderEffect.createBlurEffect()`；
+- 清除输入法 DecorView 的背景模糊，避免模糊键盘后面的屏幕；
 - 低于 Android 12 或厂商 API 缺失时保护性跳过，不影响原版输入法启动。
 
 当前版本优先完成模糊效果；渐变、Monet 取色、动态噪点、描边和其它魔改功能需在设备上确认原版窗口树与系统实现后继续拆分，避免靠猜测 hook 私有类。
