@@ -30,6 +30,11 @@ internal object ImeBlurHook {
         }
         val imeService = loader.loadClass("com.bytedance.android.doubaoime.ImeService")
         hookResourceColors(module)
+        try {
+            hookKeyboardViewFillRect(module, loader)
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
+        }
         hookCreateInputView(module, imeService)
         hookStartInputView(module, imeService)
     }
@@ -70,6 +75,44 @@ internal object ImeBlurHook {
         hookColorStateList(module, Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType))
         hookColorStateList(module, Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType, Resources.Theme::class.java))
         module.log(Log.INFO, TAG, "resource key color hooks installed")
+    }
+
+    private fun hookKeyboardViewFillRect(module: XposedModule, loader: ClassLoader) {
+        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
+        val method = keyboardView.getDeclaredMethod(
+            "fillRect", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val args = chain.args.toTypedArray()
+                val left = args[0] as Int
+                val top = args[1] as Int
+                val right = args[2] as Int
+                val bottom = args[3] as Int
+                val width = right - left
+                val height = bottom - top
+                if (width in 40..300 && height in 30..180) {
+                    val colors = keyboardKeyColors()
+                    args[4] = colors.first
+                    chain.proceed(args)
+                } else {
+                    chain.proceed()
+                }
+            }
+        module.log(Log.INFO, TAG, "KeyboardView.fillRect key hook installed")
+    }
+
+    private fun keyboardKeyColors(): Pair<Int, Int> {
+        val resources = Resources.getSystem()
+        val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val name = if (dark) "system_neutral1_800" else "system_neutral1_100"
+        val id = resources.getIdentifier(name, "color", "android")
+        val color = if (id == 0) 0xfff0f0f0.toInt() else resources.getColor(id)
+        return color to color
     }
 
     private fun hookColor(module: XposedModule, method: Method) {
