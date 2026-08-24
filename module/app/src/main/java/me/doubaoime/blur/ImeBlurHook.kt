@@ -13,7 +13,9 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.RenderEffect
 import android.graphics.RenderNode
+import android.graphics.Typeface
 import android.graphics.Shader
+import java.util.WeakHashMap
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -26,6 +28,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.Window
 import android.view.WindowManager
+import android.widget.FrameLayout
 import android.view.inputmethod.EditorInfo
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -47,6 +50,7 @@ internal object ImeBlurHook {
             hookKeyboardViewFillRect(module, loader)
             hookKeyboardViewShadow(module, loader)
             hookKeyboardViewTouchBubble(module, loader)
+            hookKeyboardViewBubbleText(module, loader)
             hookToolbarPageBlur(module, loader)
             hookToolboxKeyboardView(module, loader)
             hookToolboxItemView(module, loader)
@@ -264,6 +268,112 @@ internal object ImeBlurHook {
         bitmap.setPixels(input, 0, width, 0, 0, width, height)
     }
 
+    private data class BubbleState(
+        var overlay: BubbleOverlayView? = null,
+        var bounds: RectF = RectF(),
+        var text: String = "",
+        var color: Int = Color.WHITE
+    )
+
+    private val bubbleStates = WeakHashMap<View, BubbleState>()
+
+    private fun hookKeyboardViewBubbleText(module: XposedModule, loader: ClassLoader) {
+        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
+        val method = keyboardView.getDeclaredMethod(
+            "drawText", String::class.java, Typeface::class.java,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Boolean::class.javaPrimitiveType, Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Rect::class.java, Boolean::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val view = chain.thisObject as View
+                val state = bubbleStates[view]
+                val rect = chain.getArg(8) as? Rect
+                if (state != null && rect != null && !state.bounds.isEmpty && RectF.intersects(state.bounds, RectF(rect))) {
+                    state.text = chain.getArg(0) as String
+                    state.overlay?.invalidate()
+                    Unit
+                } else {
+                    chain.proceed()
+                }
+            }
+        module.log(Log.INFO, TAG, "KeyboardView independent bubble text hook installed")
+    }
+
+    private fun showIndependentBubble(view: View, args: Array<Any?>, color: Int, module: XposedModule) {
+        val values = args.take(10).map { it as Float }
+        val shapeUtils = view.javaClass.classLoader?.loadClass("com.bytedance.android.input.keyboard.utils.ShapeUtils")
+        val method = shapeUtils?.getDeclaredMethod("g", *Array(10) { Float::class.javaPrimitiveType!! })
+        val path = method?.invoke(null, *values.toTypedArray()) as? Path ?: return
+        val bounds = RectF().also { path.computeBounds(it, true) }
+        val parent = view as? ViewGroup ?: return
+        val state = bubbleStates.getOrPut(view) { BubbleState() }
+        state.bounds = bounds
+        state.color = color
+        val overlay = state.overlay ?: BubbleOverlayView(view.context, view, state, module).also {
+            state.overlay = it
+            parent.addView(it, FrameLayout.LayoutParams(bounds.width().toInt().coerceAtLeast(1), bounds.height().toInt().coerceAtLeast(1)))
+        }
+        overlay.update(path, bounds, color)
+        overlay.bringToFront()
+        overlay.postDelayed({
+            if (bubbleStates[view] === state && state.overlay === overlay) {
+                parent.removeView(overlay)
+                state.overlay = null
+            }
+        }, 180)
+    }
+
+    private class BubbleOverlayView(
+        context: android.content.Context,
+        private val source: View,
+        private val state: BubbleState,
+        private val module: XposedModule
+    ) : View(context) {
+        private var path = Path()
+        private var offsetX = 0f
+        private var offsetY = 0f
+        private var bubbleColor = Color.WHITE
+
+        fun update(newPath: Path, bounds: RectF, color: Int) {
+            path = Path(newPath)
+            offsetX = bounds.left
+            offsetY = bounds.top
+            bubbleColor = color
+            val params = layoutParams
+            params.width = bounds.width().toInt().coerceAtLeast(1)
+            params.height = bounds.height().toInt().coerceAtLeast(1)
+            layoutParams = params
+            installBlur()
+            invalidate()
+        }
+
+        private fun installBlur() {
+            try {
+                val getRoot = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }
+                val root = getRoot.invoke(rootView) ?: return
+                val cls = Class.forName("android.view.ViewRootImpl")
+                val drawable = cls.getDeclaredMethod("createBackgroundBlurDrawable").apply { isAccessible = true }.invoke(root) as Drawable
+                drawable.javaClass.getDeclaredMethod("setBlurRadius", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(drawable, 24)
+                drawable.javaClass.getDeclaredMethod("setCornerRadius", Float::class.javaPrimitiveType).apply { isAccessible = true }.invoke(drawable, 18f)
+                val fill = GradientDrawable().apply { shape = GradientDrawable.RECTANGLE; cornerRadius = 18f; setColor(bubbleColor) }
+                background = LayerDrawable(arrayOf(drawable, fill))
+            } catch (t: Throwable) {
+                module.log(Log.WARN, TAG, "independent bubble blur unavailable: $t")
+            }
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            val local = Path(path).apply { offset(-offsetX, -offsetY) }
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER; textSize = height * 0.42f }
+            val text = state.text
+            if (text.isNotEmpty()) canvas.drawText(text, width / 2f, height * 0.62f, paint)
+        }
+    }
+
     private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
         val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
         val bubble = keyboardView.getDeclaredMethod(
@@ -279,9 +389,8 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val args = chain.args.toTypedArray()
-                blurBubbleBackdrop(chain.thisObject as View, args, module)
-                args[10] = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
-                chain.proceed(args)
+                showIndependentBubble(chain.thisObject as View, args, monetPopupColor(args[10] as Int, (chain.thisObject as View).resources), module)
+                Unit
             }
             val shadow = keyboardView.getDeclaredMethod(
                 "drawTouchTipBubbleShadow",
