@@ -309,6 +309,7 @@ internal object ImeBlurHook {
             if (id != 0) root.findViewById<View>(id)?.background = null
         }
         module.log(Log.INFO, TAG, "applied toolbox Monet surface ${root.width}x${root.height} dark=$dark")
+        applyBlurToPopupRoot(root, module)
     }
 
     private fun hookPopupWindowBlur(module: XposedModule) {
