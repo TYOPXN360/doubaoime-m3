@@ -98,7 +98,7 @@ internal object ImeBlurHook {
                 val width = right - left
                 val height = bottom - top
                 if (width in 40..300 && height in 30..180) {
-                    args[4] = translucentGboardKeyColor(args[4] as Int)
+                    args[4] = translucentGboardKeyColor(args[4] as Int, (chain.thisObject as View).resources)
                     chain.proceed(args)
                 } else {
                     chain.proceed()
@@ -127,12 +127,12 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "KeyboardView.drawShadow softened")
     }
 
-    private fun translucentGboardKeyColor(original: Int): Int {
+    private fun translucentGboardKeyColor(original: Int, resources: Resources): Int {
         if (Color.alpha(original) < 0x80) return original
         val r = Color.red(original)
         val g = Color.green(original)
         val b = Color.blue(original)
-        val dark = Resources.getSystem().configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
         val average = (r + g + b) / 3
         val role = when {
             b > r + 20 && b > g + 10 -> if (dark) "system_accent1_700" else "system_accent1_600"
@@ -140,7 +140,7 @@ internal object ImeBlurHook {
             else -> "neutral_key"
         }
         if (role == "neutral_key") {
-            val base = if (dark) 0xff707070.toInt() else 0xffd0d0d0.toInt()
+            val base = if (dark) 0xff444746.toInt() else 0xffe2e2e2.toInt()
             return (base and 0x00ffffff) or (0x99 shl 24)
         }
         val id = Resources.getSystem().getIdentifier(role, "color", "android")
