@@ -408,9 +408,8 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val args = chain.args.toTypedArray()
-                blurBubbleBackdrop(chain.thisObject as View, args, module)
-                args[10] = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
-                chain.proceed(args)
+                showIndependentBubble(chain.thisObject as View, args, monetPopupColor(args[10] as Int, (chain.thisObject as View).resources), module)
+                Unit
             }
             val shadow = keyboardView.getDeclaredMethod(
                 "drawTouchTipBubbleShadow",
