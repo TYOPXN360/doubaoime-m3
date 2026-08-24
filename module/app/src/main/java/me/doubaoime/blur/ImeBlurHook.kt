@@ -342,10 +342,14 @@ internal object ImeBlurHook {
             offsetX = bounds.left
             offsetY = bounds.top
             bubbleColor = color
-            val params = layoutParams
-            params.width = bounds.width().toInt().coerceAtLeast(1)
-            params.height = bounds.height().toInt().coerceAtLeast(1)
-            layoutParams = params
+            val params = layoutParams as? FrameLayout.LayoutParams
+            if (params != null) {
+                params.width = bounds.width().toInt().coerceAtLeast(1)
+                params.height = bounds.height().toInt().coerceAtLeast(1)
+                params.leftMargin = bounds.left.toInt()
+                params.topMargin = bounds.top.toInt()
+                layoutParams = params
+            }
             installBlur()
             invalidate()
         }
