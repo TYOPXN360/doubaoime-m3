@@ -39,6 +39,7 @@ internal object ImeBlurHook {
             hookKeyboardViewShadow(module, loader)
             hookKeyboardViewTouchBubble(module, loader)
             hookToolbarPageBlur(module, loader)
+            hookToolboxKeyboardView(module, loader)
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
         }
@@ -197,6 +198,41 @@ internal object ImeBlurHook {
                 result
             }
         module.log(Log.INFO, TAG, "ToolbarPagerAdapter bind blur hook installed")
+    }
+
+    private fun hookToolboxKeyboardView(module: XposedModule, loader: ClassLoader) {
+        val toolbox = loader.loadClass("com.bytedance.common_biz.tool_box.ToolboxKeyboardView")
+        val method = toolbox.getDeclaredMethod("q").apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                applyToolboxSurface(chain.thisObject as View, module)
+                result
+            }
+        module.log(Log.INFO, TAG, "ToolboxKeyboardView surface hook installed")
+    }
+
+    private fun applyToolboxSurface(root: View, module: XposedModule) {
+        val dark = root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val suffix = if (dark) "800" else "100"
+        val raw = monetColor(root, "system_accent1_$suffix")
+        val color = if (raw == 0) {
+            if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
+        } else {
+            (raw and 0x00ffffff) or (0x99 shl 24)
+        }
+        val surface = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+        }
+        root.background = surface
+        val packageName = root.context.packageName
+        listOf("toolbox_header_container", "toolbox_content_container").forEach { name ->
+            val id = root.resources.getIdentifier(name, "id", packageName)
+            if (id != 0) root.findViewById<View>(id)?.background = null
+        }
+        module.log(Log.INFO, TAG, "applied toolbox Monet surface ${root.width}x${root.height} dark=$dark")
     }
 
     private fun hookPopupWindowBlur(module: XposedModule) {
