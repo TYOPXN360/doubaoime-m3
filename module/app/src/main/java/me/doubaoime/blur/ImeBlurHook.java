@@ -1,6 +1,7 @@
 package me.doubaoime.blur;
 
 import android.app.Dialog;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.os.Handler;
@@ -64,6 +65,14 @@ final class ImeBlurHook {
         }
     }
 
+    private static void clearOverlayBackground(View decor, String name) {
+        int id = decor.getResources().getIdentifier(name, "id", "com.bytedance.android.doubaoime");
+        View view = id == 0 ? null : decor.findViewById(id);
+        if (view != null) {
+            view.setBackground(new ColorDrawable(0x00000000));
+        }
+    }
+
     private static void applyToKeyboardWhole(Object service, XposedModule module) {
         try {
             Method getWindow = service.getClass().getMethod("getWindow");
@@ -96,6 +105,10 @@ final class ImeBlurHook {
             setCorner.setAccessible(true);
             setRadius.invoke(blur, BLUR_RADIUS);
             setCorner.invoke(blur, CORNER_RADIUS);
+            clearOverlayBackground(decor, "native_candidate_bar");
+            clearOverlayBackground(decor, "keyboard_main_container_area");
+            clearOverlayBackground(decor, "keyboard_whole_llm");
+            clearOverlayBackground(decor, "input_view_image_bg");
             keyboardWhole.setBackground((Drawable) blur);
             module.log(Log.INFO, TAG, "installed exact keyboard_whole blur bounds="
                     + keyboardWhole.getLeft() + "," + keyboardWhole.getTop() + ","
