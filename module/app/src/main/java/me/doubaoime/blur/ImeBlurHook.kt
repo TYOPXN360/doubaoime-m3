@@ -194,7 +194,7 @@ internal object ImeBlurHook {
             val right = (bounds.right.toInt() + 8).coerceIn(left + 1, bitmap.width)
             val bottom = (bounds.bottom.toInt() + 8).coerceIn(top + 1, bitmap.height)
             val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-            blurBitmap(source, 7)
+            blurBitmap(source, 5, 3)
             canvas.save()
             canvas.clipPath(path)
             canvas.drawBitmap(source, left.toFloat(), top.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
@@ -206,30 +206,35 @@ internal object ImeBlurHook {
         }
     }
 
-    private fun blurBitmap(bitmap: Bitmap, radius: Int) {
+    private fun blurBitmap(bitmap: Bitmap, radius: Int, passes: Int) {
         val width = bitmap.width
         val height = bitmap.height
-        val input = IntArray(width * height)
-        val horizontal = IntArray(input.size)
-        val output = IntArray(input.size)
+        var input = IntArray(width * height)
+        var horizontal = IntArray(input.size)
+        var output = IntArray(input.size)
         bitmap.getPixels(input, 0, width, 0, 0, width, height)
-        for (y in 0 until height) for (x in 0 until width) {
-            var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
-            for (dx in -radius..radius) {
-                val color = input[y * width + (x + dx).coerceIn(0, width - 1)]
-                aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
+        repeat(passes) {
+            for (y in 0 until height) for (x in 0 until width) {
+                var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
+                for (dx in -radius..radius) {
+                    val color = input[y * width + (x + dx).coerceIn(0, width - 1)]
+                    aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
+                }
+                horizontal[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
             }
-            horizontal[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
-        }
-        for (y in 0 until height) for (x in 0 until width) {
-            var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
-            for (dy in -radius..radius) {
-                val color = horizontal[(y + dy).coerceIn(0, height - 1) * width + x]
-                aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
+            for (y in 0 until height) for (x in 0 until width) {
+                var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
+                for (dy in -radius..radius) {
+                    val color = horizontal[(y + dy).coerceIn(0, height - 1) * width + x]
+                    aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
+                }
+                output[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
             }
-            output[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
+            val swap = input
+            input = output
+            output = swap
         }
-        bitmap.setPixels(output, 0, width, 0, 0, width, height)
+        bitmap.setPixels(input, 0, width, 0, 0, width, height)
     }
 
     private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
