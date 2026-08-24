@@ -6,11 +6,13 @@ import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.inputmethod.EditorInfo;
 
@@ -99,6 +101,49 @@ final class ImeBlurHook {
         }
     }
 
+    private static void applyGboardKeyColors(View root) {
+        int lightKey = systemColor(root, "system_neutral1_100", 0xfff0f0f0);
+        int darkKey = systemColor(root, "system_neutral1_800", 0xff303030);
+        int lightPressed = systemColor(root, "system_accent1_200", 0xffd8e2ff);
+        int darkPressed = systemColor(root, "system_accent1_700", 0xff465d91);
+        applyGboardKeyColors(root, lightKey, darkKey, lightPressed, darkPressed);
+    }
+
+    private static void applyGboardKeyColors(View view, int lightKey, int darkKey,
+            int lightPressed, int darkPressed) {
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                applyGboardKeyColors(group.getChildAt(i), lightKey, darkKey, lightPressed, darkPressed);
+            }
+            return;
+        }
+        if (!view.isClickable() || view.getWidth() < 24 || view.getHeight() < 24) return;
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed}, rounded(lightPressed));
+        states.addState(new int[]{-android.R.attr.state_enabled}, rounded(darkKey));
+        states.addState(new int[0], rounded(lightKey));
+        view.setBackground(states);
+    }
+
+    private static Drawable rounded(int color) {
+        android.graphics.drawable.GradientDrawable drawable =
+                new android.graphics.drawable.GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(6f);
+        return drawable;
+    }
+
+    private static int systemColor(View view, String name, int fallback) {
+        int id = view.getResources().getIdentifier(name, "color", "android");
+        if (id == 0) return fallback;
+        try {
+            return view.getContext().getColor(id);
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
     private static void applyToKeyboardWhole(Object service, XposedModule module) {
         try {
             Method getWindow = service.getClass().getMethod("getWindow");
@@ -140,6 +185,7 @@ final class ImeBlurHook {
                     ? (Drawable) blur
                     : new LayerDrawable(new Drawable[]{(Drawable) blur, monet});
             keyboardWhole.setBackground(background);
+            applyGboardKeyColors(keyboardWhole);
             module.log(Log.INFO, TAG, "installed exact keyboard_whole blur bounds="
                     + keyboardWhole.getLeft() + "," + keyboardWhole.getTop() + ","
                     + keyboardWhole.getRight() + "," + keyboardWhole.getBottom());
