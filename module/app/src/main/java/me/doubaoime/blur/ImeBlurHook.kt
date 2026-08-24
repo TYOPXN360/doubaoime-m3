@@ -179,7 +179,9 @@ internal object ImeBlurHook {
             .intercept { chain ->
                 val result = chain.proceed()
                 val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(result) as? View
-                itemView?.postDelayed({ applyToolbarPageSurface(itemView, module) }, 40)
+                if (itemView != null) {
+                    applyToolbarPageSurface(itemView, module)
+                }
                 result
             }
         val bind = adapter.getDeclaredMethod("onBindViewHolder", holder, Int::class.javaPrimitiveType)
@@ -189,7 +191,9 @@ internal object ImeBlurHook {
             .intercept { chain ->
                 val result = chain.proceed()
                 val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(chain.getArg(0)) as? View
-                itemView?.postDelayed({ applyToolbarPageSurface(itemView, module) }, 40)
+                if (itemView != null) {
+                    applyToolbarPageSurface(itemView, module)
+                }
                 result
             }
         module.log(Log.INFO, TAG, "ToolbarPagerAdapter bind blur hook installed")
