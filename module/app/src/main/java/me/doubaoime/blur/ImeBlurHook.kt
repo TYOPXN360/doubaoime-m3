@@ -197,7 +197,9 @@ internal object ImeBlurHook {
             val right = (bounds.right.toInt() + 8).coerceIn(left + 1, bitmap.width)
             val bottom = (bounds.bottom.toInt() + 8).coerceIn(top + 1, bitmap.height)
             val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-            if (!blurBitmapSystem(source, 18f)) blurBitmap(source, 5, 3)
+            val systemBlur = blurBitmapSystem(source, 18f, module)
+            if (!systemBlur) blurBitmap(source, 5, 3)
+            module.log(Log.INFO, TAG, "bubble blur path=${if (systemBlur) "RenderEffect" else "CPU fallback"}")
             canvas.save()
             canvas.clipPath(path)
             canvas.drawBitmap(source, left.toFloat(), top.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
@@ -209,7 +211,7 @@ internal object ImeBlurHook {
         }
     }
 
-    private fun blurBitmapSystem(bitmap: Bitmap, radius: Float): Boolean {
+    private fun blurBitmapSystem(bitmap: Bitmap, radius: Float, module: XposedModule): Boolean {
         if (Build.VERSION.SDK_INT < 31) return false
         return try {
             val node = RenderNode("doubao-bubble-blur")
@@ -225,7 +227,8 @@ internal object ImeBlurHook {
             Canvas(bitmap).drawBitmap(blurred, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG))
             blurred.recycle()
             true
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "RenderEffect bubble blur unavailable: ${t.javaClass.name}: ${t.message}")
             false
         }
     }
