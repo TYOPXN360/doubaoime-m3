@@ -37,11 +37,6 @@ internal object ImeBlurHook {
             hookKeyboardViewFillRect(module, loader)
             hookKeyboardViewShadow(module, loader)
             hookKeyboardViewTouchBubble(module, loader)
-            try {
-                hookPopupWindowBlur(module)
-            } catch (t: Throwable) {
-                module.log(Log.WARN, TAG, "popup window hook skipped: $t")
-            }
             hookToolbarPageBlur(module, loader)
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
