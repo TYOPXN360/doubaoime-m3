@@ -183,16 +183,20 @@ internal object ImeBlurHook {
             val bitmap = view.javaClass.getDeclaredField("mBitmapBuffer").apply { isAccessible = true }.get(view) as? Bitmap ?: return
             val canvas = view.javaClass.getDeclaredField("mCurrentCanvas").apply { isAccessible = true }.get(view) as? Canvas ?: return
             val values = args.take(10).map { it as Float }
-            val xs = listOf(values[0], values[2], values[4], values[6], values[8])
-            val ys = listOf(values[1], values[3], values[5], values[7], values[9])
-            val left = (xs.minOrNull()!!.toInt() - 4).coerceIn(0, bitmap.width - 1)
-            val top = (ys.minOrNull()!!.toInt() - 4).coerceIn(0, bitmap.height - 1)
-            val right = (xs.maxOrNull()!!.toInt() + 4).coerceIn(left + 1, bitmap.width)
-            val bottom = (ys.maxOrNull()!!.toInt() + 4).coerceIn(top + 1, bitmap.height)
+            val shapeUtils = view.javaClass.classLoader?.loadClass("com.bytedance.android.input.keyboard.utils.ShapeUtils")
+            val shapeMethod = shapeUtils?.getDeclaredMethod("g", *Array(10) { Float::class.javaPrimitiveType!! })
+            val path = (shapeMethod?.invoke(null, *values.toTypedArray()) as? Path)
+                ?: Path().apply { addRect(RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat()), Path.Direction.CW) }
+            val bounds = RectF()
+            path.computeBounds(bounds, true)
+            val left = (bounds.left.toInt() - 8).coerceIn(0, bitmap.width - 1)
+            val top = (bounds.top.toInt() - 8).coerceIn(0, bitmap.height - 1)
+            val right = (bounds.right.toInt() + 8).coerceIn(left + 1, bitmap.width)
+            val bottom = (bounds.bottom.toInt() + 8).coerceIn(top + 1, bitmap.height)
             val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
             blurBitmap(source, 7)
             canvas.save()
-            canvas.clipPath(Path().apply { addRoundRect(RectF(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat()), 18f, 18f, Path.Direction.CW) })
+            canvas.clipPath(path)
             canvas.drawBitmap(source, left.toFloat(), top.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
             canvas.restore()
             source.recycle()
