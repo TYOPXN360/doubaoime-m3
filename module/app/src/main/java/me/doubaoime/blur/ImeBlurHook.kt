@@ -27,8 +27,10 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.Gravity
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.PopupWindow
 import android.view.inputmethod.EditorInfo
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -50,6 +52,7 @@ internal object ImeBlurHook {
             hookKeyboardViewFillRect(module, loader)
             hookKeyboardViewShadow(module, loader)
             hookKeyboardViewTouchBubble(module, loader)
+            hookKeyboardViewBubbleText(module, loader)
             hookToolbarPageBlur(module, loader)
             hookToolboxKeyboardView(module, loader)
             hookToolboxItemView(module, loader)
@@ -269,6 +272,7 @@ internal object ImeBlurHook {
 
     private data class BubbleState(
         var overlay: BubbleOverlayView? = null,
+        var popup: PopupWindow? = null,
         var bounds: RectF = RectF(),
         var text: String = "",
         var color: Int = Color.WHITE
@@ -290,7 +294,8 @@ internal object ImeBlurHook {
                 val view = chain.thisObject as View
                 val state = bubbleStates[view]
                 val rect = chain.getArg(8) as? Rect
-                if (state != null && rect != null && !state.bounds.isEmpty && RectF.intersects(state.bounds, RectF(rect))) {
+                val textSize = chain.getArg(2) as? Int ?: 0
+                if (state != null && textSize >= 48 && rect != null && !state.bounds.isEmpty && RectF.intersects(state.bounds, RectF(rect))) {
                     state.text = chain.getArg(0) as String
                     state.overlay?.invalidate()
                     Unit
@@ -307,19 +312,30 @@ internal object ImeBlurHook {
         val method = shapeUtils?.getDeclaredMethod("g", *Array(10) { Float::class.javaPrimitiveType!! })
         val path = method?.invoke(null, *values.toTypedArray()) as? Path ?: return
         val bounds = RectF().also { path.computeBounds(it, true) }
-        val parent = view as? ViewGroup ?: return
         val state = bubbleStates.getOrPut(view) { BubbleState() }
         state.bounds = bounds
         state.color = color
-        val overlay = state.overlay ?: BubbleOverlayView(view.context, view, state, module).also {
-            state.overlay = it
-            parent.addView(it, FrameLayout.LayoutParams(bounds.width().toInt().coerceAtLeast(1), bounds.height().toInt().coerceAtLeast(1)))
-        }
+        val overlay = state.overlay ?: BubbleOverlayView(view.context, view, state, module).also { state.overlay = it }
         overlay.update(path, bounds, color)
-        overlay.bringToFront()
+        val location = IntArray(2)
+        view.getLocationOnScreen(location)
+        val x = location[0] + bounds.left.toInt()
+        val y = location[1] + bounds.top.toInt()
+        val width = bounds.width().toInt().coerceAtLeast(1)
+        val height = bounds.height().toInt().coerceAtLeast(1)
+        val popup = state.popup ?: PopupWindow(overlay, width, height, false).apply {
+            isClippingEnabled = false
+            isTouchable = false
+            elevation = 0f
+            state.popup = this
+            showAtLocation(view, Gravity.TOP or Gravity.START, x, y)
+        }
+        if (popup.isShowing) popup.update(x, y, width, height)
+        overlay.post { overlay.refreshBlur() }
         overlay.postDelayed({
-            if (bubbleStates[view] === state && state.overlay === overlay) {
-                parent.removeView(overlay)
+            if (bubbleStates[view] === state && state.popup === popup) {
+                popup.dismiss()
+                state.popup = null
                 state.overlay = null
             }
         }, 180)
@@ -349,11 +365,11 @@ internal object ImeBlurHook {
                 params.topMargin = bounds.top.toInt()
                 layoutParams = params
             }
-            installBlur()
+            refreshBlur()
             invalidate()
         }
 
-        private fun installBlur() {
+        fun refreshBlur() {
             try {
                 val getRoot = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }
                 val root = getRoot.invoke(rootView) ?: return
