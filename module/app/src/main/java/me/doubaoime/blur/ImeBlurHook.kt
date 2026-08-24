@@ -4,6 +4,7 @@ import android.app.Dialog
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.res.Resources
+import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.LayerDrawable
@@ -96,8 +97,7 @@ internal object ImeBlurHook {
                 val width = right - left
                 val height = bottom - top
                 if (width in 40..300 && height in 30..180) {
-                    val colors = keyboardKeyColors()
-                    args[4] = colors.first
+                    args[4] = translucentGboardKeyColor(args[4] as Int)
                     chain.proceed(args)
                 } else {
                     chain.proceed()
@@ -106,13 +106,19 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "KeyboardView.fillRect key hook installed")
     }
 
-    private fun keyboardKeyColors(): Pair<Int, Int> {
-        val resources = Resources.getSystem()
-        val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
-        val name = if (dark) "system_neutral1_800" else "system_neutral1_100"
-        val id = resources.getIdentifier(name, "color", "android")
-        val color = if (id == 0) 0xfff0f0f0.toInt() else resources.getColor(id)
-        return color to color
+    private fun translucentGboardKeyColor(original: Int): Int {
+        val r = Color.red(original)
+        val g = Color.green(original)
+        val b = Color.blue(original)
+        val dark = Resources.getSystem().configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val role = when {
+            b > r + 20 && b > g + 10 -> if (dark) "system_accent1_700" else "system_accent1_600"
+            maxOf(r, g, b) - minOf(r, g, b) < 24 -> if (dark) "system_neutral2_800" else "system_neutral2_100"
+            else -> if (dark) "system_neutral1_800" else "system_neutral1_100"
+        }
+        val id = Resources.getSystem().getIdentifier(role, "color", "android")
+        val base = if (id == 0) original else Resources.getSystem().getColor(id)
+        return (base and 0x00ffffff) or (0x99 shl 24)
     }
 
     private fun hookColor(module: XposedModule, method: Method) {
