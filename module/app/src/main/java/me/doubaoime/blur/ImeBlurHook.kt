@@ -181,7 +181,17 @@ internal object ImeBlurHook {
                 itemView?.postDelayed({ applyBlurToPopupRoot(itemView, module) }, 40)
                 result
             }
-        module.log(Log.INFO, TAG, "ToolbarPagerAdapter page blur hook installed")
+        val bind = adapter.getDeclaredMethod("onBindViewHolder", holder, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        module.hook(bind)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(chain.getArg(0)) as? View
+                itemView?.postDelayed({ applyBlurToPopupRoot(itemView, module) }, 40)
+                result
+            }
+        module.log(Log.INFO, TAG, "ToolbarPagerAdapter bind blur hook installed")
     }
 
     private fun hookPopupWindowBlur(module: XposedModule) {
