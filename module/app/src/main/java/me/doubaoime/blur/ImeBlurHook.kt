@@ -33,6 +33,7 @@ internal object ImeBlurHook {
         hookResourceColors(module)
         try {
             hookKeyboardViewFillRect(module, loader)
+            hookKeyboardViewShadow(module, loader)
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
         }
@@ -106,7 +107,28 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "KeyboardView.fillRect key hook installed")
     }
 
+    private fun hookKeyboardViewShadow(module: XposedModule, loader: ClassLoader) {
+        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
+        val method = keyboardView.getDeclaredMethod(
+            "drawShadow", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Float::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val args = chain.args.toTypedArray()
+                val original = args[8] as Int
+                args[8] = (original and 0x00ffffff) or (0x20 shl 24)
+                chain.proceed(args)
+            }
+        module.log(Log.INFO, TAG, "KeyboardView.drawShadow softened")
+    }
+
     private fun translucentGboardKeyColor(original: Int): Int {
+        if (Color.alpha(original) < 0x80) return original
         val r = Color.red(original)
         val g = Color.green(original)
         val b = Color.blue(original)
