@@ -5,6 +5,12 @@ import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -172,6 +178,45 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "KeyboardView.drawShadow softened")
     }
 
+    private fun blurBubbleBackdrop(view: View, args: Array<Any?>, module: XposedModule) {
+        try {
+            val bitmap = view.javaClass.getDeclaredField("mBitmapBuffer").apply { isAccessible = true }.get(view) as? Bitmap ?: return
+            val canvas = view.javaClass.getDeclaredField("mCurrentCanvas").apply { isAccessible = true }.get(view) as? Canvas ?: return
+            val values = args.take(10).map { it as Float }
+            val left = values.minOrNull()!!.toInt().coerceIn(0, bitmap.width - 1)
+            val top = values.minOrNull()!!.toInt().coerceIn(0, bitmap.height - 1)
+            val right = values.maxOrNull()!!.toInt().coerceIn(left + 1, bitmap.width)
+            val bottom = values.maxOrNull()!!.toInt().coerceIn(top + 1, bitmap.height)
+            val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
+            blurBitmap(source, 7)
+            canvas.save()
+            canvas.clipPath(Path().apply { addRoundRect(RectF(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat()), 18f, 18f, Path.Direction.CW) })
+            canvas.drawBitmap(source, left.toFloat(), top.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
+            canvas.restore()
+            source.recycle()
+            module.log(Log.INFO, TAG, "blurred long-press backdrop ${right - left}x${bottom - top}")
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "long-press backdrop blur skipped: $t")
+        }
+    }
+
+    private fun blurBitmap(bitmap: Bitmap, radius: Int) {
+        val width = bitmap.width
+        val height = bitmap.height
+        val input = IntArray(width * height)
+        val output = IntArray(input.size)
+        bitmap.getPixels(input, 0, width, 0, 0, width, height)
+        for (y in 0 until height) for (x in 0 until width) {
+            var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
+            for (dy in -radius..radius) for (dx in -radius..radius) {
+                val color = input[(y + dy).coerceIn(0, height - 1) * width + (x + dx).coerceIn(0, width - 1)]
+                aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
+            }
+            output[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
+        }
+        bitmap.setPixels(output, 0, width, 0, 0, width, height)
+    }
+
     private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
         val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
         val bubble = keyboardView.getDeclaredMethod(
@@ -187,11 +232,12 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val args = chain.args.toTypedArray()
+                blurBubbleBackdrop(chain.thisObject as View, args, module)
                 args[10] = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
                 chain.proceed(args)
             }
-        val shadow = keyboardView.getDeclaredMethod(
-            "drawTouchTipBubbleShadow",
+            val shadow = keyboardView.getDeclaredMethod(
+                "drawTouchTipBubbleShadow",
             Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
             Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
             Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
