@@ -302,6 +302,7 @@ internal object ImeBlurHook {
             setColor(color)
         }
         root.background = surface
+        if (root is ViewGroup && root.childCount > 0) root.getChildAt(0).background = null
         val packageName = root.context.packageName
         listOf("toolbox_header_container", "toolbox_content_container").forEach { name ->
             val id = root.resources.getIdentifier(name, "id", packageName)
