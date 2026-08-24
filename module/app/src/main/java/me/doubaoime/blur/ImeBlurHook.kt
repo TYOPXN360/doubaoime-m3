@@ -369,17 +369,19 @@ internal object ImeBlurHook {
         }
 
         fun refreshBlur() {
+            background = null
             try {
-                val getRoot = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }
-                val root = getRoot.invoke(rootView) ?: return
-                val cls = Class.forName("android.view.ViewRootImpl")
-                val drawable = cls.getDeclaredMethod("createBackgroundBlurDrawable").apply { isAccessible = true }.invoke(root) as Drawable
-                drawable.javaClass.getDeclaredMethod("setBlurRadius", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(drawable, 24)
-                drawable.javaClass.getDeclaredMethod("setCornerRadius", Float::class.javaPrimitiveType).apply { isAccessible = true }.invoke(drawable, 18f)
-                val fill = GradientDrawable().apply { shape = GradientDrawable.RECTANGLE; cornerRadius = 18f; setColor(bubbleColor) }
-                background = LayerDrawable(arrayOf(drawable, fill))
+                val root = rootView
+                val rootImpl = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }.invoke(root) ?: return
+                val surface = rootImpl.javaClass.getDeclaredMethod("getSurfaceControl").apply { isAccessible = true }.invoke(rootImpl) ?: return
+                val transactionClass = Class.forName("android.view.SurfaceControl\$Transaction")
+                val transaction = transactionClass.getDeclaredConstructor().newInstance()
+                transactionClass.getDeclaredMethod("setBackgroundBlurRadius", Class.forName("android.view.SurfaceControl"), Int::class.javaPrimitiveType)
+                    .apply { isAccessible = true }.invoke(transaction, surface, 24)
+                transactionClass.getDeclaredMethod("apply").apply { isAccessible = true }.invoke(transaction)
+                module.log(Log.INFO, TAG, "bubble blur path=SurfaceControl")
             } catch (t: Throwable) {
-                module.log(Log.WARN, TAG, "independent bubble blur unavailable: $t")
+                module.log(Log.WARN, TAG, "SurfaceControl bubble blur unavailable: $t")
             }
         }
 
@@ -407,7 +409,7 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val args = chain.args.toTypedArray()
-                blurBubbleBackdrop(chain.thisObject as View, args, module)
+                showIndependentBubble(chain.thisObject as View, args, monetPopupColor(args[10] as Int, (chain.thisObject as View).resources), module)
                 args[10] = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
                 chain.proceed(args)
             }
