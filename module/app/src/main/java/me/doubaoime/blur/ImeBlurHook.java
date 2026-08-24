@@ -5,7 +5,6 @@ import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
-import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
 import android.os.Build;
 import android.os.Handler;
@@ -77,21 +76,13 @@ final class ImeBlurHook {
         }
     }
 
-    private static Drawable createMonetGradient(View decor) {
+    private static Drawable createMonetColor(View decor) {
         boolean dark = (decor.getResources().getConfiguration().uiMode
                 & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         String suffix = dark ? "800" : "100";
-        int raw1 = monetColor(decor, "system_accent1_" + suffix);
-        int raw2 = monetColor(decor, "system_accent2_" + suffix);
-        int raw3 = monetColor(decor, "system_accent3_" + suffix);
-        if (raw1 == 0 || raw2 == 0 || raw3 == 0) return null;
-        int c1 = withAlpha(raw1, 0x66);
-        int c2 = withAlpha(raw2, 0x66);
-        int c3 = withAlpha(raw3, 0x66);
-        GradientDrawable gradient = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR, new int[]{c1, c2, c3});
-        gradient.setAlpha(255);
-        return gradient;
+        int raw = monetColor(decor, "system_accent1_" + suffix);
+        if (raw == 0) return null;
+        return new ColorDrawable(withAlpha(raw, 0x66));
     }
 
     private static int withAlpha(int color, int alpha) {
@@ -144,7 +135,7 @@ final class ImeBlurHook {
             clearOverlayBackground(decor, "keyboard_main_container_area");
             clearOverlayBackground(decor, "keyboard_whole_llm");
             clearOverlayBackground(decor, "input_view_image_bg");
-            Drawable monet = createMonetGradient(decor);
+            Drawable monet = createMonetColor(decor);
             Drawable background = monet == null
                     ? (Drawable) blur
                     : new LayerDrawable(new Drawable[]{(Drawable) blur, monet});
