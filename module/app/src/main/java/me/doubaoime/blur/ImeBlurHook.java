@@ -81,14 +81,21 @@ final class ImeBlurHook {
         boolean dark = (decor.getResources().getConfiguration().uiMode
                 & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
         String suffix = dark ? "800" : "100";
-        int c1 = monetColor(decor, "system_accent1_" + suffix);
-        int c2 = monetColor(decor, "system_accent2_" + suffix);
-        int c3 = monetColor(decor, "system_accent3_" + suffix);
-        if (c1 == 0 || c2 == 0 || c3 == 0) return null;
+        int raw1 = monetColor(decor, "system_accent1_" + suffix);
+        int raw2 = monetColor(decor, "system_accent2_" + suffix);
+        int raw3 = monetColor(decor, "system_accent3_" + suffix);
+        if (raw1 == 0 || raw2 == 0 || raw3 == 0) return null;
+        int c1 = withAlpha(raw1, 0x66);
+        int c2 = withAlpha(raw2, 0x66);
+        int c3 = withAlpha(raw3, 0x66);
         GradientDrawable gradient = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR, new int[]{c1, c2, c3});
         gradient.setAlpha(255);
         return gradient;
+    }
+
+    private static int withAlpha(int color, int alpha) {
+        return (color & 0x00ffffff) | (alpha << 24);
     }
 
     private static int monetColor(View decor, String name) {
