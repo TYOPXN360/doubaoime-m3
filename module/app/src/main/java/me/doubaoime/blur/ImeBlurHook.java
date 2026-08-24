@@ -1,8 +1,12 @@
 package me.doubaoime.blur;
 
 import android.app.Dialog;
+import android.content.res.Configuration;
+import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -73,6 +77,30 @@ final class ImeBlurHook {
         }
     }
 
+    private static Drawable createMonetGradient(View decor) {
+        boolean dark = (decor.getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        String suffix = dark ? "800" : "100";
+        int c1 = monetColor(decor, "system_accent1_" + suffix);
+        int c2 = monetColor(decor, "system_accent2_" + suffix);
+        int c3 = monetColor(decor, "system_accent3_" + suffix);
+        if (c1 == 0 || c2 == 0 || c3 == 0) return null;
+        GradientDrawable gradient = new GradientDrawable(
+                GradientDrawable.Orientation.TL_BR, new int[]{c1, c2, c3});
+        gradient.setAlpha(255);
+        return gradient;
+    }
+
+    private static int monetColor(View decor, String name) {
+        int id = decor.getResources().getIdentifier(name, "color", "android");
+        if (id == 0) return 0;
+        try {
+            return decor.getContext().getColor(id);
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
     private static void applyToKeyboardWhole(Object service, XposedModule module) {
         try {
             Method getWindow = service.getClass().getMethod("getWindow");
@@ -109,7 +137,11 @@ final class ImeBlurHook {
             clearOverlayBackground(decor, "keyboard_main_container_area");
             clearOverlayBackground(decor, "keyboard_whole_llm");
             clearOverlayBackground(decor, "input_view_image_bg");
-            keyboardWhole.setBackground((Drawable) blur);
+            Drawable monet = createMonetGradient(decor);
+            Drawable background = monet == null
+                    ? (Drawable) blur
+                    : new LayerDrawable(new Drawable[]{(Drawable) blur, monet});
+            keyboardWhole.setBackground(background);
             module.log(Log.INFO, TAG, "installed exact keyboard_whole blur bounds="
                     + keyboardWhole.getLeft() + "," + keyboardWhole.getTop() + ","
                     + keyboardWhole.getRight() + "," + keyboardWhole.getBottom());
