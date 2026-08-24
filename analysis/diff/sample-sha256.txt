@@ -1,0 +1,2 @@
+9e73a3da37ff8e731ca10d347b52a5a4e5d45e54acec809c74101ba24914249e  source/豆包输入法_1.4.2.apk
+0e4d4afd11f528d776a90c187ced1cc04d5def138256d34d0add2cad14e680e1  source/豆包魔改版.apk

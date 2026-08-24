@@ -1,0 +1,10 @@
+--- analysis/original/resource-files.txt	2026-08-25 01:27:27.745570895 +0800
++++ analysis/modded/resource-files.txt	2026-08-25 01:27:27.749570896 +0800
+@@ -1435,6 +1435,7 @@
+ res/drawable/input_popup_tip_bg_transparent.xml
+ res/drawable/input_popup_tip_bottom_bg.png
+ res/drawable/item_emoticons_bg.xml
++res/drawable/keyboard_bg_image.png
+ res/drawable/letter_bar_unfold_button.xml
+ res/drawable/loading_cartoon.xml
+ res/drawable/logo.png

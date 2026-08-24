@@ -1,0 +1,11 @@
+tools/
+!tools/SHA256SUMS
+analysis/*/jadx/
+analysis/*/apktool/
+module/.gradle/
+module/.gradle-home/
+module/build/
+module/**/build/
+module/local.properties
+source/*.apk
+*.keystore

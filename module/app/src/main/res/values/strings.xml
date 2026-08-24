@@ -1,0 +1,4 @@
+<resources>
+    <string name="module_name">豆包输入法模糊效果</string>
+    <string name="module_description">将魔改版已确认的输入法背景模糊效果移植到原版</string>
+</resources>
