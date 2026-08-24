@@ -13,7 +13,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
+import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -34,6 +36,13 @@ internal object ImeBlurHook {
         try {
             hookKeyboardViewFillRect(module, loader)
             hookKeyboardViewShadow(module, loader)
+            hookKeyboardViewTouchBubble(module, loader)
+            try {
+                hookPopupWindowBlur(module)
+            } catch (t: Throwable) {
+                module.log(Log.WARN, TAG, "popup window hook skipped: $t")
+            }
+            hookToolbarPageBlur(module, loader)
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
         }
@@ -125,6 +134,111 @@ internal object ImeBlurHook {
                 chain.proceed(args)
             }
         module.log(Log.INFO, TAG, "KeyboardView.drawShadow softened")
+    }
+
+    private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
+        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
+        val bubble = keyboardView.getDeclaredMethod(
+            "drawTouchTipBubble",
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        module.hook(bubble)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val args = chain.args.toTypedArray()
+                args[10] = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
+                chain.proceed(args)
+            }
+        val shadow = keyboardView.getDeclaredMethod(
+            "drawTouchTipBubbleShadow",
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
+            Int::class.javaPrimitiveType, Float::class.javaPrimitiveType
+        ).apply { isAccessible = true }
+        module.hook(shadow)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val args = chain.args.toTypedArray()
+                args[10] = (args[10] as Int and 0x00ffffff) or (0x28 shl 24)
+                chain.proceed(args)
+            }
+        module.log(Log.INFO, TAG, "KeyboardView long-press bubble Monet hook installed")
+    }
+
+    private fun hookToolbarPageBlur(module: XposedModule, loader: ClassLoader) {
+        val adapter = loader.loadClass("com.bytedance.android.input.keyboard.CustomToolbar.ToolbarPagerAdapter")
+        val holder = loader.loadClass("androidx.recyclerview.widget.RecyclerView\$ViewHolder")
+        val method = adapter.getDeclaredMethod("onCreateViewHolder", ViewGroup::class.java, Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(result) as? View
+                itemView?.postDelayed({ applyBlurToPopupRoot(itemView, module) }, 40)
+                result
+            }
+        module.log(Log.INFO, TAG, "ToolbarPagerAdapter page blur hook installed")
+    }
+
+    private fun hookPopupWindowBlur(module: XposedModule) {
+        val wm = Class.forName("android.view.WindowManagerImpl")
+        val addView = wm.getMethod("addView", View::class.java, WindowManager.LayoutParams::class.java)
+            .apply { isAccessible = true }
+        module.hook(addView)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                val view = chain.getArg(0) as? View
+                if (view?.context?.packageName == "com.bytedance.android.doubaoime") {
+                    view.postDelayed({ applyBlurToPopupRoot(view, module) }, 80)
+                }
+                result
+            }
+        module.log(Log.INFO, TAG, "WindowManager popup blur hook installed")
+    }
+
+    private fun applyBlurToPopupRoot(root: View, module: XposedModule) {
+        try {
+            val getViewRootImpl = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }
+            val viewRootImpl = getViewRootImpl.invoke(root.rootView) ?: return
+            val viewRootClass = Class.forName("android.view.ViewRootImpl")
+            val create = viewRootClass.getDeclaredMethod("createBackgroundBlurDrawable").apply { isAccessible = true }
+            val blur = create.invoke(viewRootImpl) as? Drawable ?: return
+            val blurClass = blur.javaClass
+            blurClass.getDeclaredMethod("setBlurRadius", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(blur, BLUR_RADIUS)
+            blurClass.getDeclaredMethod("setCornerRadius", Float::class.javaPrimitiveType).apply { isAccessible = true }.invoke(blur, CORNER_RADIUS)
+            val monet = createMonetColor(root)
+            root.background = if (monet == null) blur else LayerDrawable(arrayOf(blur, monet))
+            module.log(Log.INFO, TAG, "installed popup blur class=${root.javaClass.name} bounds=${root.width}x${root.height}")
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "popup blur skipped: $t")
+        }
+    }
+
+    private fun monetPopupColor(original: Int, resources: Resources): Int {
+        val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val r = Color.red(original)
+        val g = Color.green(original)
+        val b = Color.blue(original)
+        val blue = b > r + 20 && b > g + 10
+        val name = when {
+            blue -> if (dark) "system_accent1_700" else "system_accent1_600"
+            dark -> "system_neutral1_700"
+            else -> "system_neutral1_100"
+        }
+        val system = Resources.getSystem()
+        val id = system.getIdentifier(name, "color", "android")
+        val base = if (id == 0) original else system.getColor(id)
+        return (base and 0x00ffffff) or (0xb8 shl 24)
     }
 
     private fun translucentGboardKeyColor(original: Int, resources: Resources): Int {
