@@ -1,7 +1,9 @@
 package me.doubaoime.blur
 
 import android.app.Dialog
+import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.content.res.Resources
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.LayerDrawable
@@ -27,6 +29,7 @@ internal object ImeBlurHook {
             return
         }
         val imeService = loader.loadClass("com.bytedance.android.doubaoime.ImeService")
+        hookResourceColors(module)
         hookCreateInputView(module, imeService)
         hookStartInputView(module, imeService)
     }
@@ -58,6 +61,75 @@ internal object ImeBlurHook {
         val handler = Handler(Looper.getMainLooper())
         intArrayOf(100, 300, 700, 1200).forEach { delay ->
             handler.postDelayed({ applyToKeyboardWhole(service, module) }, delay.toLong())
+        }
+    }
+
+    private fun hookResourceColors(module: XposedModule) {
+        hookColor(module, Resources::class.java.getDeclaredMethod("getColor", Int::class.javaPrimitiveType))
+        hookColor(module, Resources::class.java.getDeclaredMethod("getColor", Int::class.javaPrimitiveType, Resources.Theme::class.java))
+        hookColorStateList(module, Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType))
+        hookColorStateList(module, Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType, Resources.Theme::class.java))
+        module.log(Log.INFO, TAG, "resource key color hooks installed")
+    }
+
+    private fun hookColor(module: XposedModule, method: Method) {
+        method.isAccessible = true
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val resources = chain.thisObject as Resources
+                val replacement = resolveKeyColor(resources, chain.getArg(0) as Int)
+                if (replacement != null) replacement else chain.proceed()
+            }
+    }
+
+    private fun hookColorStateList(module: XposedModule, method: Method) {
+        method.isAccessible = true
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val resources = chain.thisObject as Resources
+                val replacement = resolveKeyColor(resources, chain.getArg(0) as Int)
+                if (replacement != null) ColorStateList.valueOf(replacement) else chain.proceed()
+            }
+    }
+
+    private fun resolveKeyColor(resources: Resources, id: Int): Int? {
+        val name = try { resources.getResourceEntryName(id) } catch (_: Throwable) { return null }
+        val role = when (name) {
+            "ime_key_normal_bg_color" -> Role.KEY
+            "ime_key_normal_press_bg_color" -> Role.KEY_PRESSED
+            "ime_key_gray_clickable_bg_color", "ime_key_gray_un_clickable_bg_color" -> Role.FUNCTION
+            "ime_key_gray_clickable_press_bg_color", "ime_key_gray_un_clickable_press_bg_color" -> Role.FUNCTION_PRESSED
+            "ime_key_blue_clickable_bg_color" -> Role.ACCENT
+            "ime_key_blue_clickable_press_bg_color" -> Role.ACCENT_PRESSED
+            "ime_key_text_clickable_color" -> Role.FOREGROUND
+            "ime_key_text_un_clickable_color", "ime_key_hint_text_color", "ime_space_button_text_color" -> Role.FOREGROUND_MUTED
+            "ime_key_shadow_color" -> Role.SHADOW
+            else -> return null
+        }
+        return role.color(resources)
+    }
+
+    private enum class Role {
+        KEY, KEY_PRESSED, FUNCTION, FUNCTION_PRESSED, ACCENT, ACCENT_PRESSED,
+        FOREGROUND, FOREGROUND_MUTED, SHADOW;
+
+        fun color(resources: Resources): Int {
+            val dark = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+            val name = when (this) {
+                KEY -> if (dark) "system_neutral1_800" else "system_neutral1_100"
+                KEY_PRESSED -> if (dark) "system_accent1_700" else "system_accent1_200"
+                FUNCTION -> if (dark) "system_neutral2_800" else "system_neutral2_100"
+                FUNCTION_PRESSED -> if (dark) "system_accent2_700" else "system_accent2_200"
+                ACCENT -> if (dark) "system_accent1_700" else "system_accent1_600"
+                ACCENT_PRESSED -> if (dark) "system_accent1_600" else "system_accent1_700"
+                FOREGROUND -> if (dark) "system_neutral1_10" else "system_neutral1_900"
+                FOREGROUND_MUTED -> if (dark) "system_neutral2_100" else "system_neutral2_700"
+                SHADOW -> if (dark) "system_neutral1_900" else "system_neutral1_100"
+            }
+            val id = resources.getIdentifier(name, "color", "android")
+            return if (id == 0) 0 else resources.getColor(id)
         }
     }
 
