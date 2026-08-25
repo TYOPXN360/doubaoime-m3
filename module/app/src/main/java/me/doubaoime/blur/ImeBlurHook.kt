@@ -34,6 +34,7 @@ internal object ImeBlurHook {
     private const val TAG = "DoubaoImeBlur"
     private const val BLUR_RADIUS = 20
     private const val CORNER_RADIUS = 0f
+    private var keyboardWholeBlurred = false
 
     fun install(loader: ClassLoader, module: XposedModule) {
         if (Build.VERSION.SDK_INT < 31) {
@@ -52,9 +53,8 @@ internal object ImeBlurHook {
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
         }
-        hookCreateInputView(module, imeService)
-        hookStartInputView(module, imeService)
         hookInputViewRootToolboxProbe(module, loader)
+        module.log(Log.INFO, TAG, "visual hooks enabled; keyboard whole blur disabled for Android 17")
     }
 
     private fun hookInputViewRootToolboxProbe(module: XposedModule, loader: ClassLoader) {
@@ -485,6 +485,7 @@ internal object ImeBlurHook {
 
     private fun applyToKeyboardWhole(service: Any, module: XposedModule) {
         try {
+            if (keyboardWholeBlurred) return
             val getWindow = service.javaClass.getMethod("getWindow")
             val dialog = getWindow.invoke(service) as? Dialog ?: return
             val window: Window = dialog.window ?: return
@@ -508,7 +509,8 @@ internal object ImeBlurHook {
             clearOverlayBackground(decor, "input_view_image_bg")
             val monet = createMonetColor(decor)
             keyboardWhole.background = if (monet == null) blur else LayerDrawable(arrayOf(blur, monet))
-            module.log(Log.INFO, TAG, "installed exact keyboard_whole blur bounds=" +
+            keyboardWholeBlurred = true
+            module.log(Log.INFO, TAG, "installed direct systemui-style blur on keyboard_whole bounds=" +
                 "${keyboardWhole.left},${keyboardWhole.top},${keyboardWhole.right},${keyboardWhole.bottom}")
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "keyboard_whole blur skipped: $t")
