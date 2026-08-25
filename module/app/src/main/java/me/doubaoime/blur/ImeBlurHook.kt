@@ -11,11 +11,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
-import android.graphics.RenderEffect
-import android.graphics.RenderNode
-import android.graphics.Typeface
-import android.graphics.Shader
-import java.util.WeakHashMap
+import java.io.File
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -24,13 +20,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
-import android.view.Gravity
 import android.view.WindowManager
-import android.widget.FrameLayout
-import android.widget.PopupWindow
 import android.view.inputmethod.EditorInfo
 import io.github.libxposed.api.XposedInterface
 import io.github.libxposed.api.XposedModule
@@ -77,7 +71,6 @@ internal object ImeBlurHook {
                             val toolbox = field.get(chain.thisObject) as? View
                             if (toolbox != null) {
                                 applyToolboxSurface(toolbox, module)
-                                dumpToolboxTree(toolbox, module, 0)
                             } else {
                                 module.log(Log.WARN, TAG, "toolbox probe: X0 is null")
                             }
@@ -89,15 +82,6 @@ internal object ImeBlurHook {
                 result
             }
         module.log(Log.INFO, TAG, "InputViewRoot toolbox probe installed")
-    }
-
-    private fun dumpToolboxTree(view: View, module: XposedModule, depth: Int) {
-        if (depth > 3) return
-        val background = view.background
-        module.log(Log.INFO, TAG, "toolbox[$depth] ${view.javaClass.name} id=${view.id} visible=${view.visibility} size=${view.width}x${view.height} bg=${background?.javaClass?.name} color=${(background as? ColorDrawable)?.color}")
-        if (view is ViewGroup) {
-            for (i in 0 until view.childCount) dumpToolboxTree(view.getChildAt(i), module, depth + 1)
-        }
     }
 
     private fun hookCreateInputView(module: XposedModule, imeService: Class<*>) {
@@ -179,219 +163,10 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val args = chain.args.toTypedArray()
-                val original = args[8] as Int
-                args[8] = (original and 0x00ffffff) or (0x20 shl 24)
+                args[8] = (args[8] as Int and 0x00ffffff) or (0x20 shl 24)
                 chain.proceed(args)
             }
         module.log(Log.INFO, TAG, "KeyboardView.drawShadow softened")
-    }
-
-    private fun blurBubbleBackdrop(view: View, args: Array<Any?>, module: XposedModule) {
-        try {
-            val bitmap = view.javaClass.getDeclaredField("mBitmapBuffer").apply { isAccessible = true }.get(view) as? Bitmap ?: return
-            val canvas = view.javaClass.getDeclaredField("mCurrentCanvas").apply { isAccessible = true }.get(view) as? Canvas ?: return
-            val values = args.take(10).map { it as Float }
-            val shapeUtils = view.javaClass.classLoader?.loadClass("com.bytedance.android.input.keyboard.utils.ShapeUtils")
-            val shapeMethod = shapeUtils?.getDeclaredMethod("g", *Array(10) { Float::class.javaPrimitiveType!! })
-            val path = (shapeMethod?.invoke(null, *values.toTypedArray()) as? Path)
-                ?: Path().apply { addRect(RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat()), Path.Direction.CW) }
-            val bounds = RectF()
-            path.computeBounds(bounds, true)
-            val left = (bounds.left.toInt() - 8).coerceIn(0, bitmap.width - 1)
-            val top = (bounds.top.toInt() - 8).coerceIn(0, bitmap.height - 1)
-            val right = (bounds.right.toInt() + 8).coerceIn(left + 1, bitmap.width)
-            val bottom = (bounds.bottom.toInt() + 8).coerceIn(top + 1, bitmap.height)
-            val source = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-            val systemBlur = blurBitmapSystem(source, 18f, module)
-            if (!systemBlur) blurBitmap(source, 5, 3)
-            module.log(Log.INFO, TAG, "bubble blur path=${if (systemBlur) "RenderEffect" else "CPU fallback"}")
-            canvas.save()
-            canvas.clipPath(path)
-            canvas.drawBitmap(source, left.toFloat(), top.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG))
-            canvas.restore()
-            source.recycle()
-            module.log(Log.INFO, TAG, "blurred long-press backdrop ${right - left}x${bottom - top}")
-        } catch (t: Throwable) {
-            module.log(Log.WARN, TAG, "long-press backdrop blur skipped: $t")
-        }
-    }
-
-    private fun blurBitmapSystem(bitmap: Bitmap, radius: Float, module: XposedModule): Boolean {
-        if (Build.VERSION.SDK_INT < 31) return false
-        return try {
-            val node = RenderNode("doubao-bubble-blur")
-            node.setPosition(0, 0, bitmap.width, bitmap.height)
-            node.setRenderEffect(RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP))
-            val recording = node.beginRecording(bitmap.width, bitmap.height)
-            recording.drawBitmap(bitmap, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG))
-            node.endRecording()
-            val method = Class.forName("android.graphics.HardwareRenderer").getDeclaredMethod(
-                "createHardwareBitmap", RenderNode::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType
-            ).apply { isAccessible = true }
-            val blurred = method.invoke(null, node, bitmap.width, bitmap.height) as? Bitmap ?: return false
-            Canvas(bitmap).drawBitmap(blurred, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG))
-            blurred.recycle()
-            true
-        } catch (t: Throwable) {
-            module.log(Log.WARN, TAG, "RenderEffect bubble blur unavailable: ${t.javaClass.name}: ${t.message}")
-            false
-        }
-    }
-
-    private fun blurBitmap(bitmap: Bitmap, radius: Int, passes: Int) {
-        val width = bitmap.width
-        val height = bitmap.height
-        var input = IntArray(width * height)
-        var horizontal = IntArray(input.size)
-        var output = IntArray(input.size)
-        bitmap.getPixels(input, 0, width, 0, 0, width, height)
-        repeat(passes) {
-            for (y in 0 until height) for (x in 0 until width) {
-                var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
-                for (dx in -radius..radius) {
-                    val color = input[y * width + (x + dx).coerceIn(0, width - 1)]
-                    aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
-                }
-                horizontal[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
-            }
-            for (y in 0 until height) for (x in 0 until width) {
-                var ar = 0; var ag = 0; var ab = 0; var aa = 0; var count = 0
-                for (dy in -radius..radius) {
-                    val color = horizontal[(y + dy).coerceIn(0, height - 1) * width + x]
-                    aa += Color.alpha(color); ar += Color.red(color); ag += Color.green(color); ab += Color.blue(color); count++
-                }
-                output[y * width + x] = Color.argb(aa / count, ar / count, ag / count, ab / count)
-            }
-            val swap = input
-            input = output
-            output = swap
-        }
-        bitmap.setPixels(input, 0, width, 0, 0, width, height)
-    }
-
-    private data class BubbleState(
-        var overlay: BubbleOverlayView? = null,
-        var popup: PopupWindow? = null,
-        var bounds: RectF = RectF(),
-        var text: String = "",
-        var color: Int = Color.WHITE
-    )
-
-    private val bubbleStates = WeakHashMap<View, BubbleState>()
-
-    private fun hookKeyboardViewBubbleText(module: XposedModule, loader: ClassLoader) {
-        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
-        val method = keyboardView.getDeclaredMethod(
-            "drawText", String::class.java, Typeface::class.java,
-            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-            Boolean::class.javaPrimitiveType, Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Rect::class.java, Boolean::class.javaPrimitiveType
-        ).apply { isAccessible = true }
-        module.hook(method)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val view = chain.thisObject as View
-                val state = bubbleStates[view]
-                val rect = chain.getArg(8) as? Rect
-                val textSize = chain.getArg(2) as? Int ?: 0
-                if (state != null && textSize >= 48 && rect != null && !state.bounds.isEmpty && RectF.intersects(state.bounds, RectF(rect))) {
-                    state.text = chain.getArg(0) as String
-                    state.overlay?.invalidate()
-                    Unit
-                } else {
-                    chain.proceed()
-                }
-            }
-        module.log(Log.INFO, TAG, "KeyboardView independent bubble text hook installed")
-    }
-
-    private fun showIndependentBubble(view: View, args: Array<Any?>, color: Int, module: XposedModule) {
-        val values = args.take(10).map { it as Float }
-        val shapeUtils = view.javaClass.classLoader?.loadClass("com.bytedance.android.input.keyboard.utils.ShapeUtils")
-        val method = shapeUtils?.getDeclaredMethod("g", *Array(10) { Float::class.javaPrimitiveType!! })
-        val path = method?.invoke(null, *values.toTypedArray()) as? Path ?: return
-        val bounds = RectF().also { path.computeBounds(it, true) }
-        val state = bubbleStates.getOrPut(view) { BubbleState() }
-        state.bounds = bounds
-        state.color = color
-        val overlay = state.overlay ?: BubbleOverlayView(view.context, view, state, module).also { state.overlay = it }
-        overlay.update(path, bounds, color)
-        val location = IntArray(2)
-        view.getLocationOnScreen(location)
-        val x = location[0] + bounds.left.toInt()
-        val y = location[1] + bounds.top.toInt()
-        val width = bounds.width().toInt().coerceAtLeast(1)
-        val height = bounds.height().toInt().coerceAtLeast(1)
-        val popup = state.popup ?: PopupWindow(overlay, width, height, false).apply {
-            isClippingEnabled = false
-            isTouchable = false
-            elevation = 0f
-            state.popup = this
-            showAtLocation(view, Gravity.TOP or Gravity.START, x, y)
-        }
-        if (popup.isShowing) popup.update(x, y, width, height)
-        overlay.post { overlay.refreshBlur() }
-        overlay.postDelayed({
-            if (bubbleStates[view] === state && state.popup === popup) {
-                popup.dismiss()
-                state.popup = null
-                state.overlay = null
-            }
-        }, 180)
-    }
-
-    private class BubbleOverlayView(
-        context: android.content.Context,
-        private val source: View,
-        private val state: BubbleState,
-        private val module: XposedModule
-    ) : View(context) {
-        private var path = Path()
-        private var offsetX = 0f
-        private var offsetY = 0f
-        private var bubbleColor = Color.WHITE
-
-        fun update(newPath: Path, bounds: RectF, color: Int) {
-            path = Path(newPath)
-            offsetX = bounds.left
-            offsetY = bounds.top
-            bubbleColor = color
-            val params = layoutParams as? FrameLayout.LayoutParams
-            if (params != null) {
-                params.width = bounds.width().toInt().coerceAtLeast(1)
-                params.height = bounds.height().toInt().coerceAtLeast(1)
-                params.leftMargin = bounds.left.toInt()
-                params.topMargin = bounds.top.toInt()
-                layoutParams = params
-            }
-            refreshBlur()
-            invalidate()
-        }
-
-        fun refreshBlur() {
-            background = null
-            try {
-                val root = rootView
-                val rootImpl = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }.invoke(root) ?: return
-                val surface = rootImpl.javaClass.getDeclaredMethod("getSurfaceControl").apply { isAccessible = true }.invoke(rootImpl) ?: return
-                val transactionClass = Class.forName("android.view.SurfaceControl\$Transaction")
-                val transaction = transactionClass.getDeclaredConstructor().newInstance()
-                transactionClass.getDeclaredMethod("setBackgroundBlurRadius", Class.forName("android.view.SurfaceControl"), Int::class.javaPrimitiveType)
-                    .apply { isAccessible = true }.invoke(transaction, surface, 24)
-                transactionClass.getDeclaredMethod("apply").apply { isAccessible = true }.invoke(transaction)
-                module.log(Log.INFO, TAG, "bubble blur path=SurfaceControl")
-            } catch (t: Throwable) {
-                module.log(Log.WARN, TAG, "SurfaceControl bubble blur unavailable: $t")
-            }
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            val local = Path(path).apply { offset(-offsetX, -offsetY) }
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textAlign = Paint.Align.CENTER; textSize = height * 0.42f }
-            val text = state.text
-            if (text.isNotEmpty()) canvas.drawText(text, width / 2f, height * 0.62f, paint)
-        }
     }
 
     private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
@@ -409,8 +184,8 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val args = chain.args.toTypedArray()
-                blurBubbleBackdrop(chain.thisObject as View, args, module)
-                args[10] = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
+                val monet = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
+                args[10] = (monet and 0x00ffffff) or (0x88 shl 24)
                 chain.proceed(args)
             }
             val shadow = keyboardView.getDeclaredMethod(
@@ -602,7 +377,7 @@ internal object ImeBlurHook {
         val system = Resources.getSystem()
         val id = system.getIdentifier(name, "color", "android")
         val base = if (id == 0) original else system.getColor(id)
-        return (base and 0x00ffffff) or (0x88 shl 24)
+        return (base and 0x00ffffff) or (0xb8 shl 24)
     }
 
     private fun translucentGboardKeyColor(original: Int, resources: Resources): Int {
