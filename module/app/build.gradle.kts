@@ -1,10 +1,11 @@
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
 }
 
 android {
     namespace = "me.doubaoime.blur"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "me.doubaoime.blur"
@@ -34,4 +35,5 @@ android {
 
 dependencies {
     compileOnly(libs.libxposed.api)
+    implementation(libs.materialkolor.utilities)
 }

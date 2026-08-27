@@ -1,9 +1,13 @@
 [versions]
-agp = "9.2.1"
+agp = "9.3.2"
+kotlin = "2.4.0"
 libxposed-api = "102.0.0"
+materialkolor = "5.0.0"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 
 [libraries]
 libxposed-api = { group = "io.github.libxposed", name = "api", version.ref = "libxposed-api" }
+materialkolor-utilities = { module = "com.materialkolor:material-color-utilities", version.ref = "materialkolor" }
