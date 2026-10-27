@@ -89,6 +89,7 @@ internal object ImeBlurHook {
             "toolboxToggle" to { hookToolboxToggle(module, loader) },
             "emojiToggle" to { hookEmojiToggle(module, loader) },
             "emojiBar" to { hookEmojiSegmentedBar(module, loader) },
+            "clipboardDismiss" to { hookClipboardDismiss(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
                 module.log(Log.WARN, TAG, "$name hook skipped: $t")
@@ -132,27 +133,107 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "toolbar background probe installed")
     }
 
-    private var clipboardWatchAttached = false
+    /**
+     * 剪贴板提示整行自己也带着 0x66 强调色（它的 #222222 被 globalMonetSurface 换掉了），
+     * 叠在 keyboard_whole 同一层 0x66 上就成了双层，看着明显更深。
+     * 这一行只留底板那层，把 alpha=0x66 的重复上色清掉；分隔线是 0x33 的白色，不动。
+     */
+    private fun clearDoubleTint(v: View, module: XposedModule): Int {
+        var n = 0
+        val bg = v.background
+        if (bg is ColorDrawable && (bg.color ushr 24) == 0x66) {
+            v.background = ColorDrawable(0x00000000)
+            n++
+        }
+        if (v is ViewGroup) for (i in 0 until v.childCount) n += clearDoubleTint(v.getChildAt(i), module)
+        return n
+    }
+
+    private var clipBar: View? = null
+    private var clipContainer: View? = null
+    private var clipHookInstalled = false
 
     /**
      * 复制内容后输入法会在工具栏那一行弹出剪贴板提示（ImeToolBarContainer），
-     * 它和 native_candidate_bar 是同一个容器的兄弟、同一位置同一高度 —— 两个都可见
+     * 它和 native_candidate_bar 是同一个容器的兄弟、同一位置同高度 —— 两个都可见
      * 就变成重影 + 两层底色叠加。提示显示期间把底下的候选栏 alpha 归零，收起再恢复。
+     *
+     * 注意容器和候选栏会被重新创建（换应用/二次弹出），所以引用要每次都刷新，
+     * 不能只挂一次监听，否则第二次弹出就失效。
      */
     private fun watchClipboardToolbar(bar: View, module: XposedModule) {
-        if (clipboardWatchAttached) return
         val parent = bar.parent as? ViewGroup ?: return
         val container = (0 until parent.childCount)
             .map { parent.getChildAt(it) }
             .firstOrNull { it !== bar && it.javaClass.simpleName == "ImeToolBarContainer" } ?: return
-        clipboardWatchAttached = true
-        container.viewTreeObserver.addOnGlobalLayoutListener {
-            val showing = container.visibility == View.VISIBLE && container.height > 0
-            val target = if (showing) 0f else 1f
-            if (bar.alpha != target) {
-                bar.alpha = target
-                module.log(Log.INFO, TAG, "clipboard toolbar showing=$showing candidateBarAlpha=$target")
+
+        val firstSeen = container !== clipContainer
+        clipBar = bar
+        clipContainer = container
+
+        if (firstSeen) {
+            container.viewTreeObserver.addOnGlobalLayoutListener { syncClipboardToolbar(module) }
+        }
+        syncClipboardToolbar(module)
+
+        if (!clipHookInstalled) {
+            clipHookInstalled = true
+            try {
+                val method = View::class.java.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType)
+                module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
+                    if (chain.thisObject !== clipContainer) return@intercept chain.proceed()
+                    val result = chain.proceed()
+                    syncClipboardToolbar(module)
+                    result
+                }
+                module.log(Log.INFO, TAG, "clipboard visibility hook installed")
+            } catch (t: Throwable) {
+                module.log(Log.WARN, TAG, "clipboard visibility hook failed: $t")
             }
+        }
+    }
+
+    private fun syncClipboardToolbar(module: XposedModule) {
+        val bar = clipBar ?: return
+        val container = clipContainer ?: return
+        val closeId = container.resources.getIdentifier("toolbar_clipboard_close", "id", container.context.packageName)
+        val closeView = if (closeId != 0) container.findViewById<View>(closeId) else null
+        val showing = container.visibility == View.VISIBLE && closeView != null && closeView.visibility == View.VISIBLE
+        val target = if (showing) 0f else 1f
+        if (bar.alpha != target) {
+            bar.alpha = target
+            val cleared = if (showing) clearDoubleTint(container, module) else 0
+            module.log(Log.INFO, TAG, "clipboard toolbar showing=$showing candidateBarAlpha=$target clearedTint=$cleared")
+        }
+    }
+
+    private fun hookClipboardDismiss(module: XposedModule, loader: ClassLoader) {
+        val cls = loader.loadClass("com.bytedance.android.input.keyboard.toolbar.clipboard.ToolbarClipboardLayoutImpl")
+        val method = cls.getDeclaredMethod("dismiss").apply { isAccessible = true }
+        module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
+            val result = chain.proceed()
+            try {
+                restoreCandidateBar(chain.thisObject as View, module)
+            } catch (_: Throwable) {
+            }
+            result
+        }
+        module.log(Log.INFO, TAG, "clipboard dismiss hook installed")
+    }
+
+    private fun restoreCandidateBar(from: View, module: XposedModule) {
+        var p: View? = from
+        while (p != null) {
+            val n = try { if (p.id == View.NO_ID) "" else p.resources.getResourceEntryName(p.id) } catch (_: Throwable) { "" }
+            if (n == "keyboard_main_container_area") {
+                val bar = findViewByName(p, "native_candidate_bar")
+                if (bar != null && bar.alpha != 1f) {
+                    bar.alpha = 1f
+                    module.log(Log.INFO, TAG, "candidate bar restored after clipboard dismiss")
+                }
+                return
+            }
+            p = p.parent as? View
         }
     }
 
