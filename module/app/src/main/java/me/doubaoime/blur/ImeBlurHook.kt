@@ -19,6 +19,7 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -692,9 +693,142 @@ internal object ImeBlurHook {
             emoji.background = ColorDrawable(0x00000000)
             val barId = emoji.resources.getIdentifier("segmented_bar", "id", emoji.context.packageName)
             if (barId != 0) emoji.findViewById<View>(barId)?.let { applySegmentedBarSurface(it, module) }
+
+            // 分类 tab 栏（笑脸/手势/人物/爱心…）是 TabLayout，不是 SegmentedBar。
+            // 它自身和每个 tab 内的自定义 TextView 都挂着 drawable/emoji_btn_tab —— 
+            // 一个深灰不透明 selector（默认 #ff2f2f2f / 选中 #ff434343），
+            // 所以整条栏是死的灰色。这里全部清掉，只留键盘那层 0x66 Monet 底。
+            listOf("emoji_tab", "kaomoji_tab").forEach { name ->
+                val id = emoji.resources.getIdentifier(name, "id", emoji.context.packageName)
+                if (id == 0) return@forEach
+                (emoji.findViewById<View>(id) as? ViewGroup)?.let { clearTabBarBackground(it, module) }
+            }
+            // 同一行的时钟格子挂着同一颗 selector，单独清一下
+            val tabId = emoji.resources.getIdentifier("emoji_tab", "id", emoji.context.packageName)
+            val tab = if (tabId != 0) emoji.findViewById<View>(tabId) else null
+            val row = tab?.parent as? ViewGroup
+            if (row != null) {
+                for (i in 0 until row.childCount) {
+                    val c = row.getChildAt(i)
+                    if (c !== tab && kotlin.math.abs(c.top - tab.top) < 4) tintEmojiButton(c, module)
+                }
+            }
+            // 删除键：底色和图标都换成强调色
+            val delId = emoji.resources.getIdentifier("btn_backspace", "id", emoji.context.packageName)
+            if (delId != 0) emoji.findViewById<View>(delId)?.let { tintEmojiButton(it, module) }
             module.log(Log.INFO, TAG, "emoji surface cleared")
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "emoji surface failed: $t")
+        }
+    }
+
+    /**
+     * 清掉 TabLayout 整条分类栏的背景（含每个 tab 内的自定义 view）。
+     *
+     * 只改 TabView.background 不够：TabLayout 自己缓存了 tabBackgroundResId /
+     * tabBackgroundDrawable，任何一次 updateTabViews()（切分类、横向滚动、重新布局）
+     * 都会把那个不透明 selector 原样套回去 —— 表现就是"改完还是灰的"。
+     * 所以先把这两个源头字段废掉，再清现存 View。
+     */
+    private fun clearTabBarBackground(tabBar: ViewGroup, module: XposedModule) {
+        tabBar.background = ColorDrawable(0x00000000)
+        var killed = 0
+        for (f in tabBar.javaClass.declaredFields) {
+            if (java.lang.reflect.Modifier.isStatic(f.modifiers)) continue
+            if (!f.name.lowercase().contains("tabbackground")) continue
+            try {
+                f.isAccessible = true
+                when {
+                    f.type == Int::class.javaPrimitiveType -> { f.setInt(tabBar, 0); killed++ }
+                    Drawable::class.java.isAssignableFrom(f.type) -> { f.set(tabBar, null); killed++ }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+        if (killed > 0) Log.i(TAG, "tab bar background source killed n=$killed")
+        for (i in 0 until tabBar.childCount) {
+            clearTabItemBackground(tabBar.getChildAt(i))
+        }
+        // TabView 是 TabLayout 内部类，custom view 常延迟创建，补一次
+        tabBar.post {
+            var n = 0
+            for (i in 0 until tabBar.childCount) n += clearTabItemBackground(tabBar.getChildAt(i))
+            if (n > 0) module.log(Log.INFO, TAG, "tab selector tinted n=$n")
+        }
+    }
+
+    /**
+     * 递归清掉 tab 子树背景。
+     *
+     * 那颗灰在最深一层：TabLayout -> SlidingTabIndicator -> TabView -> TextView，
+     * TabView 的 TextView 挂着 StateListDrawable(emoji_btn_tab)，
+     * 默认 #ff2f2f2f / 选中 #ff434343，正好铺满 108x68 一整格 —— 就是那条死灰。
+     * 直接抹平会丢掉"当前选中"的反馈，所以换成 Monet 半透明版本：
+     * 未选中全透明，选中是强调色 40% 的圆角块。
+     */
+    private fun clearTabItemBackground(view: View): Int {
+        var n = 0
+        when (val bg = view.background) {
+            null -> {}
+            is StateListDrawable -> {
+                view.background = monetTabSelector(view)
+                n++
+            }
+            is ColorDrawable -> if (bg.color != Color.TRANSPARENT) {
+                view.background = ColorDrawable(0x00000000)
+                n++
+            }
+            else -> {
+                view.background = ColorDrawable(0x00000000)
+                n++
+            }
+        }
+        if (view is ViewGroup) for (i in 0 until view.childCount) n += clearTabItemBackground(view.getChildAt(i))
+        return n
+    }
+
+    /** 表情面板里的功能键（时钟、删除）：底色和图标统一换成 Monet 强调色。 */
+    private fun tintEmojiButton(view: View, module: XposedModule) {
+        try {
+            val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+            val raw = monetColor(view, if (dark) "system_accent1_200" else "system_accent1_600")
+            val base = if (raw == 0) {
+                if (dark) 0xff9fb0e8.toInt() else 0xff3f4f8f.toInt()
+            } else raw
+            view.background = GradientDrawable().apply {
+                setShape(GradientDrawable.RECTANGLE)
+                cornerRadius = view.resources.displayMetrics.density * 24f
+                setColor(withAlpha(base, 0x33))
+            }
+            if (view is android.widget.TextView) {
+                view.setTextColor(base)
+                val cur = view.compoundDrawables
+                val ds: Array<Drawable?> = Array(4) { i -> cur.getOrNull(i)?.mutate()?.apply { setTint(base) } }
+                if (ds.any { it != null }) view.setCompoundDrawablesWithIntrinsicBounds(ds[0], ds[1], ds[2], ds[3])
+            }
+            if (view is android.widget.ImageView) view.imageTintList = ColorStateList.valueOf(base)
+            val name = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "?" }
+            module.log(Log.INFO, TAG, "emoji button tinted #$name -> #" + Integer.toHexString(base))
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "emoji button tint failed: $t")
+        }
+    }
+
+    private fun monetTabSelector(view: View): Drawable {
+        val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val raw = monetColor(view, if (dark) "system_accent1_800" else "system_accent1_100")
+        val base = if (raw == 0) {
+            if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
+        } else raw
+        val radius = view.resources.displayMetrics.density * 16f
+        fun shape(color: Int) = GradientDrawable().apply {
+            setShape(GradientDrawable.RECTANGLE)
+            cornerRadius = radius
+            setColor(color)
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_selected), shape(withAlpha(base, 0x66)))
+            addState(intArrayOf(), shape(Color.TRANSPARENT))
         }
     }
 
