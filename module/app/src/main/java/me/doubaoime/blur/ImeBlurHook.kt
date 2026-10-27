@@ -61,10 +61,10 @@ internal object ImeBlurHook {
             // "shadow" to { hookKeyboardViewShadow(module, loader) },
             // "bubble" to { hookKeyboardViewTouchBubble(module, loader) },
             "toolboxView" to { hookToolboxKeyboardView(module, loader) },
-            "toolboxItem" to { hookToolboxItemView(module, loader) },
+            // "toolboxItem" to { hookToolboxItemView(module, loader) },
             "candidate" to { hookCandidateItemSelected(module, loader) },
             // "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
-            "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
+            // "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
                 module.log(Log.WARN, TAG, "$name hook skipped: $t")
@@ -168,14 +168,22 @@ internal object ImeBlurHook {
                 if (chain.getArg(0) == true) {
                     Handler(Looper.getMainLooper()).postDelayed({
                         try {
-                            // 字段名是混淆的（旧版 X0），按类型找唯一的 toolbox View 字段
-                            val toolbox = rootClass.declaredFields
-                                .firstOrNull { View::class.java.isAssignableFrom(it.type) }
-                                ?.apply { isAccessible = true }
-                                ?.get(chain.thisObject) as? View
-                            if (toolbox != null) {
-                                applyToolboxSurface(toolbox, module)
+                            // 字段名混淆（旧版 X0），只能按类型猜。
+                            // 绝不能取「第一个 View 字段」——那是键盘/全屏容器，
+                            // 给它铺半透明强调色就会把整屏染青。
+                            // 这里只接受尺寸明显小于整屏、且含 toolbox 子 id 的容器。
+                            val candidates = rootClass.declaredFields
+                                .filter { View::class.java.isAssignableFrom(it.type) }
+                                .mapNotNull { f ->
+                                    f.isAccessible = true
+                                    (try { f.get(chain.thisObject) } catch (_: Throwable) { null }) as? View
+                                }
+                            val screenH = chain.thisObject.let { (it as View).resources.displayMetrics.heightPixels }
+                            val toolbox = candidates.firstOrNull { v ->
+                                v.height in 1..(screenH / 2) &&
+                                    v.resources.getIdentifier("toolbox_content_container", "id", v.context.packageName) != 0
                             }
+                            if (toolbox != null) applyToolboxSurface(toolbox, module)
                         } catch (t: Throwable) {
                             module.log(Log.WARN, TAG, "toolbox probe failed: $t")
                         }
@@ -570,15 +578,10 @@ internal object ImeBlurHook {
                 applyToolboxSurface(chain.thisObject as View, module)
                 result
             }
-        val attached = View::class.java.getDeclaredMethod("onAttachedToWindow")
-        module.hook(attached)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                applyToolboxSurface(chain.thisObject as View, module)
-                result
-            }
-        module.log(Log.INFO, TAG, "ToolboxKeyboardView attach blur hook installed")
+        // 注意：绝不能 hook View.onAttachedToWindow —— 那对进程里每一个 View 都生效，
+        // 而 applyToolboxSurface 会给 thisObject 铺半透明强调色背景，等于把整屏染色。
+        // 只保留上面针对 ToolboxKeyboardView 自身方法的 hook。
+        module.log(Log.INFO, TAG, "ToolboxKeyboardView refresh hook installed via ${method.name}")
     }
 
     private fun hookToolboxItemView(module: XposedModule, loader: ClassLoader) {
@@ -931,7 +934,7 @@ internal object ImeBlurHook {
             clearOverlayBackground(decor, "keyboard_whole_llm")
             clearOverlayBackground(decor, "input_view_image_bg")
             val monet = createMonetColor(decor)
-            keyboardWhole.background = monet
+            // keyboardWhole.background = monet  // 测试：禁用 Monet 染色
             val toolbarId = decor.resources.getIdentifier("native_candidate_bar", "id", "com.bytedance.android.doubaoime")
             if (toolbarId != 0) decor.findViewById<View>(toolbarId)?.background = ColorDrawable(0x00000000)
             applyKeyboardWholeBlur(keyboardWhole, decor, module)
