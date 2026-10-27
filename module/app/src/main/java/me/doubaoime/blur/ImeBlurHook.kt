@@ -117,6 +117,7 @@ internal object ImeBlurHook {
                 if (color != null && idName !in setOf("-", "")) {
                     module.log(Log.INFO, TAG, "setBackground view=$cls id=$idName color=#${Integer.toHexString(color)}")
                 }
+                if (idName == "native_candidate_bar") watchClipboardToolbar(view, module)
                 if (idName in TRANSPARENT_BG_IDS) {
                     module.log(Log.INFO, TAG, "kept bg transparent over Monet body id=$idName")
                     chain.proceed(arrayOf<Any>(ColorDrawable(0x00000000)))
@@ -129,6 +130,30 @@ internal object ImeBlurHook {
                 }
             }
         module.log(Log.INFO, TAG, "toolbar background probe installed")
+    }
+
+    private var clipboardWatchAttached = false
+
+    /**
+     * 复制内容后输入法会在工具栏那一行弹出剪贴板提示（ImeToolBarContainer），
+     * 它和 native_candidate_bar 是同一个容器的兄弟、同一位置同一高度 —— 两个都可见
+     * 就变成重影 + 两层底色叠加。提示显示期间把底下的候选栏 alpha 归零，收起再恢复。
+     */
+    private fun watchClipboardToolbar(bar: View, module: XposedModule) {
+        if (clipboardWatchAttached) return
+        val parent = bar.parent as? ViewGroup ?: return
+        val container = (0 until parent.childCount)
+            .map { parent.getChildAt(it) }
+            .firstOrNull { it !== bar && it.javaClass.simpleName == "ImeToolBarContainer" } ?: return
+        clipboardWatchAttached = true
+        container.viewTreeObserver.addOnGlobalLayoutListener {
+            val showing = container.visibility == View.VISIBLE && container.height > 0
+            val target = if (showing) 0f else 1f
+            if (bar.alpha != target) {
+                bar.alpha = target
+                module.log(Log.INFO, TAG, "clipboard toolbar showing=$showing candidateBarAlpha=$target")
+            }
+        }
     }
 
     private fun hookToolbarBackgroundColorOverride(module: XposedModule) {
