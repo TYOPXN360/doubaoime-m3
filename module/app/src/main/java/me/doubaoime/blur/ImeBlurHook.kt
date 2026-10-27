@@ -151,8 +151,14 @@ internal object ImeBlurHook {
     }
 
     private fun hookInputViewRootToolboxProbe(module: XposedModule, loader: ClassLoader) {
-        val rootClass = loader.loadClass("com.bytedance.android.input.keyboard.areacontrol.InputViewRoot")
-        val method = rootClass.getDeclaredMethod("m2", Boolean::class.javaPrimitiveType, String::class.java).apply { isAccessible = true }
+        val rootClass = loader.loadClass(HookPoints.INPUT_VIEW_ROOT)
+        // 1.5.3 里对应 setNativeCandidateBarVisible(Z,String)；m2 已不存在。
+        // 按结构（bool + String → void）解析，不认名字。
+        val method = HookFinder.method(loader, HookPoints.INPUT_VIEW_ROOT, HookPoints.nativeCandidateBarVisible())
+            ?: run {
+                module.log(Log.WARN, TAG, "nativeCandidateBarVisible not found, skip toolbox probe")
+                return
+            }
         module.hook(method)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
@@ -160,12 +166,13 @@ internal object ImeBlurHook {
                 if (chain.getArg(0) == true) {
                     Handler(Looper.getMainLooper()).postDelayed({
                         try {
-                            val field = rootClass.getDeclaredField("X0").apply { isAccessible = true }
-                            val toolbox = field.get(chain.thisObject) as? View
+                            // 字段名是混淆的（旧版 X0），按类型找唯一的 toolbox View 字段
+                            val toolbox = rootClass.declaredFields
+                                .firstOrNull { View::class.java.isAssignableFrom(it.type) }
+                                ?.apply { isAccessible = true }
+                                ?.get(chain.thisObject) as? View
                             if (toolbox != null) {
                                 applyToolboxSurface(toolbox, module)
-                            } else {
-                                module.log(Log.WARN, TAG, "toolbox probe: X0 is null")
                             }
                         } catch (t: Throwable) {
                             module.log(Log.WARN, TAG, "toolbox probe failed: $t")

@@ -51,6 +51,14 @@ internal object HookPoints {
         .paramTypes("float", "float", "float", "float", "float", "float", "float", "float", "float", "float", "int", "float")
         .returnType("void")
 
+    /**
+     * 候选栏显隐。1.5.3：`setNativeCandidateBarVisible(Z,String)V`（旧版叫 m2）
+     * 按结构定位：单 boolean + String 参数、返回 void。
+     */
+    fun nativeCandidateBarVisible(): MethodMatcher = MethodMatcher.create()
+        .paramTypes("boolean", "java.lang.String")
+        .returnType("void")
+
     /** 工具栏状态变更。这三个是公开方法名，未被混淆 */
     fun setAdded(): MethodMatcher = MethodMatcher.create()
         .name("setAdded").paramCount(1).addParamType("boolean")
