@@ -55,6 +55,10 @@ internal object ImeBlurHook {
         "clipboard_common_phrase_toolbar",
         "common_phrase_toolbar",
         "common_phrase_empty",
+        // 手写找字界面
+        "lookup_tool_bar_placeholder",
+        "lookup_write_filler",
+        "lookup_btn_key_layout",
     )
     private const val BLUR_RADIUS = 20
     private const val CORNER_RADIUS = 0f
@@ -123,11 +127,7 @@ internal object ImeBlurHook {
                 if (color != null && idName !in setOf("-", "")) {
                     module.log(Log.INFO, TAG, "setBackground view=$cls id=$idName color=#${Integer.toHexString(color)}")
                 }
-                if (idName == "native_candidate_bar") {
-                    watchClipboardToolbar(view, module)
-                    val kids = (view as? ViewGroup)?.childCount ?: -1
-                    module.log(Log.INFO, TAG, "candidateBar children=$kids vis=${view.visibility} alpha=${view.alpha}")
-                }
+                if (idName == "native_candidate_bar") watchClipboardToolbar(view, module)
                 if (idName in TRANSPARENT_BG_IDS) {
                     module.log(Log.INFO, TAG, "kept bg transparent over Monet body id=$idName")
                     chain.proceed(arrayOf<Any>(ColorDrawable(0x00000000)))
@@ -256,13 +256,6 @@ internal object ImeBlurHook {
             // keep 里的（候选字栏）不但不能藏，还要强制还原
             hideOrRestoreAlpha(c, if (name in keep) false else show, tag)
         }
-        // 关键：手写板是全屏的，会盖在候选栏上把 ✕ 的点击吞掉 —— 表现就是
-        // "点了关闭没反应、候选字还留着"。保留候选栏的同时把它提到最上层。
-        if (show) for (i in 0 until container.childCount) {
-            val c = container.getChildAt(i)
-            val n = try { if (c.id == View.NO_ID) "" else c.resources.getResourceEntryName(c.id) } catch (_: Throwable) { "" }
-            if (n in keep) c.bringToFront()
-        }
         module.log(Log.INFO, TAG, "$tag isolate show=$show hidden=${hiddenByTag[tag]?.size ?: 0}")
     }
 
@@ -322,7 +315,7 @@ internal object ImeBlurHook {
 
     private fun clearHandwritingSurface(root: View, module: XposedModule) {
         try {
-            listOf("lookup_write_filler", "lookup_btn_key_layout").forEach { name ->
+            listOf("lookup_tool_bar_placeholder", "lookup_write_filler", "lookup_btn_key_layout").forEach { name ->
                 val id = root.resources.getIdentifier(name, "id", root.context.packageName)
                 if (id != 0) root.findViewById<View>(id)?.background = ColorDrawable(0x00000000)
             }
@@ -601,8 +594,7 @@ internal object ImeBlurHook {
                                 paint.color = repl
                             }
                             val drawn = chain.proceed()
-                            // Paint 是调用方复用的：SRC 必须还原，否则后续绘制（候选栏等）
-                            // 全都变成直接覆盖像素、不清旧内容 —— 表现就是点 ✕ 后的候选残影。
+                            // Paint 是调用方复用的，SRC 必须还原，否则会污染后续绘制
                             paint.color = svColor
                             paint.shader = svShader
                             paint.colorFilter = svFilter
