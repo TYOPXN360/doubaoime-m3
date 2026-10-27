@@ -224,6 +224,14 @@ internal object ImeBlurHook {
                     val show = v.visibility == View.VISIBLE
                     isolateSiblings(v, show, module, "moreCandidate")
                     if (show) clearMoreCandidateSurface(v, module)
+                } else if (v.javaClass.simpleName == "ToolboxKeyboardView") {
+                    // 笔画/其他布局下打开工具箱不走 toggle 方法，只会显示这个 view，
+                    // 所以隔离必须挂在这里，否则底下的键盘会一直透上来。
+                    val show = v.visibility == View.VISIBLE
+                    isolateSiblings(v, show, module, "toolbox")
+                } else if (v.javaClass.simpleName == "ClipboardCommonPhraseContainer") {
+                    val show = v.visibility == View.VISIBLE
+                    isolateSiblings(v, show, module, "clipboardPanel")
                 } else if (v === clipContainer) {
                     syncClipboardToolbar(module)
                 }
