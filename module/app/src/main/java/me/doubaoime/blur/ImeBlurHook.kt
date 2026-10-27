@@ -532,31 +532,23 @@ internal object ImeBlurHook {
     }
 
     private fun hookOptionItemToolbarRefresh(module: XposedModule, loader: ClassLoader) {
-        val option = loader.loadClass("com.bytedance.android.input.OptionItemView")
-        val method = option.getDeclaredMethod("setAdded", Boolean::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(method)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                scheduleToolbarRefresh(chain.thisObject as View, module)
-                result
+        listOf(
+            HookPoints.setAdded() to "setAdded",
+            HookPoints.setIcon() to "setIcon",
+            HookPoints.setLabel() to "setLabel",
+        ).forEach { (matcher, name) ->
+            val m = HookFinder.method(loader, HookPoints.OPTION_ITEM, matcher) ?: run {
+                module.log(Log.WARN, TAG, "$name not found in OptionItemView")
+                return@forEach
             }
-        val icon = option.getDeclaredMethod("setIcon", Int::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(icon)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                scheduleToolbarRefresh(chain.thisObject as View, module)
-                result
-            }
-        val label = option.getDeclaredMethod("setLabel", String::class.java).apply { isAccessible = true }
-        module.hook(label)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                scheduleToolbarRefresh(chain.thisObject as View, module)
-                result
-            }
+            module.hook(m)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept { chain ->
+                    val result = chain.proceed()
+                    scheduleToolbarRefresh(chain.thisObject as View, module)
+                    result
+                }
+        }
         module.log(Log.INFO, TAG, "OptionItemView icon/label refresh hooks installed")
     }
 
