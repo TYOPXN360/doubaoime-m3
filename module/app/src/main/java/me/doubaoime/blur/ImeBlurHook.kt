@@ -216,17 +216,6 @@ internal object ImeBlurHook {
             val result = chain.proceed()
             val v = self as? View
             if (v != null) {
-                if (v.javaClass.simpleName == "KeyboardView" && v.visibility == View.VISIBLE) {
-                    // 应用自己把键盘放回来了：撤掉我们加的隐藏标记。
-                    // 不然会残留 INVISIBLE —— 表现为松开语音键后仍停在"按住"状态，
-                    // 后续的 UP 事件根本到不了键盘。
-                    var n = 0
-                    hiddenByTag.values.forEach { if (it.remove(v) != null) n++ }
-                    if (n > 0) {
-                        v.alpha = 1f
-                        module.log(Log.INFO, TAG, "keyboard shown by app, cleared hidden marks n=$n")
-                    }
-                }
                 if (lookupCls.isInstance(v) || boardCls.isInstance(v)) {
                     val show = v.visibility == View.VISIBLE
                     isolateSiblings(v, show, module, "handwrite", keep = setOf("native_candidate_bar"))
@@ -1155,14 +1144,26 @@ internal object ImeBlurHook {
     }
 
     /**
-     * 隐藏兄弟视图。只把 alpha 置 0 是不够的 —— alpha=0 的 View 照样吃触摸事件，
-     * 表现为"点关闭键却触发底下那层的按钮"。所以同时设 INVISIBLE：
-     * 布局占位不变（不像 GONE 会重排），但不再参与事件分发。
+     * 隐藏兄弟视图：只动 alpha，绝不动 visibility。
+     *
+     * 试过设 INVISIBLE，视觉是对的，但把应用的状态机搞坏了 —— 应用认为键盘一直可见，
+     * 关掉手写时不会再调 setVisibility(VISIBLE)，我们的 INVISIBLE 就永久残留，
+     * 后续触摸事件到不了键盘，表现为"松开语音键还在一直收音"。
      */
     private fun hideOrRestoreAlpha(view: View, show: Boolean, tag: String) {
         val bucket = hiddenByTag.getOrPut(tag) { HashMap() }
+        val isKeyboard = view.javaClass.simpleName == "KeyboardView"
         if (show) {
-            if (view.visibility == View.VISIBLE) {
+            if (isKeyboard) {
+                // 键盘只降 alpha：应用认为它一直可见，动 visibility 会让它的状态机错乱
+                // （关掉手写后不再 setVisibility(VISIBLE)，UP 事件就再也到不了键盘）。
+                if (view.alpha != 0f) {
+                    bucket[view] = view.alpha
+                    view.alpha = 0f
+                }
+            } else if (view.visibility == View.VISIBLE) {
+                // 其它兄弟必须真正不可见，否则 alpha=0 仍然叠在上面吃触摸
+                // —— 候选字点不动就是这么来的。
                 bucket[view] = view.alpha
                 view.alpha = 0f
                 view.visibility = View.INVISIBLE
@@ -1170,7 +1171,7 @@ internal object ImeBlurHook {
         } else {
             bucket.remove(view)?.let {
                 view.alpha = it
-                view.visibility = View.VISIBLE
+                if (!isKeyboard) view.visibility = View.VISIBLE
             }
         }
     }
