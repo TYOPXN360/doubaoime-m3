@@ -51,6 +51,10 @@ internal object ImeBlurHook {
         "status_content",
         "status_message",
         "asr_visualizer_ll",
+        // 剪贴板 / 常用语是工具栏那一行里的同一块，同样会叠第二层
+        "clipboard_common_phrase_toolbar",
+        "common_phrase_toolbar",
+        "common_phrase_empty",
     )
     private const val BLUR_RADIUS = 20
     private const val CORNER_RADIUS = 0f
