@@ -221,7 +221,7 @@ internal object ImeBlurHook {
                     if (show) clearLookupSurface(v, module)
                 } else if (moreCls.isInstance(v)) {
                     val show = v.visibility == View.VISIBLE
-                    isolateSiblings(v, show, module, "moreCandidate", keep = setOf("native_candidate_bar"))
+                    isolateSiblings(v, show, module, "moreCandidate")
                     if (show) clearMoreCandidateSurface(v, module)
                 } else if (v === clipContainer) {
                     syncClipboardToolbar(module)
