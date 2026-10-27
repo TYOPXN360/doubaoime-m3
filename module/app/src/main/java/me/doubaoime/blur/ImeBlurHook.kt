@@ -361,14 +361,10 @@ internal object ImeBlurHook {
     }
 
     private fun hookKeyboardViewShadow(module: XposedModule, loader: ClassLoader) {
-        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
-        val method = keyboardView.getDeclaredMethod(
-            "drawShadow", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType, Float::class.javaPrimitiveType
-        ).apply { isAccessible = true }
+        val method = HookFinder.method(loader, HookPoints.KEYBOARD_VIEW, HookPoints.keyboardShadow()) ?: run {
+            module.log(Log.WARN, TAG, "drawShadow not found")
+            return
+        }
         module.hook(method)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
@@ -376,7 +372,7 @@ internal object ImeBlurHook {
                 args[8] = (args[8] as Int and 0x00ffffff) or (0x20 shl 24)
                 chain.proceed(args)
             }
-        module.log(Log.INFO, TAG, "KeyboardView.drawShadow softened")
+        module.log(Log.INFO, TAG, "KeyboardView shadow softened via ${method.name}")
     }
 
     private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
