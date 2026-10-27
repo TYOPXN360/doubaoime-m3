@@ -65,6 +65,7 @@ internal object ImeBlurHook {
             "candidate" to { hookCandidateItemSelected(module, loader) },
             "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
             "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
+            "toolboxToggle" to { hookToolboxToggle(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
                 module.log(Log.WARN, TAG, "$name hook skipped: $t")
@@ -564,6 +565,80 @@ internal object ImeBlurHook {
                 }
         }
         module.log(Log.INFO, TAG, "OptionItemView icon/label refresh hooks installed")
+    }
+
+    /**
+     * 四叶草工具页：把同容器里的键盘兄弟视图从视觉上清掉。
+     *
+     * 背景：ToolboxKeyboardView 和键盘本体是 InputViewRoot 里同一个 RelativeLayout 的兄弟节点，
+     * BackgroundBlurDrawable 只模糊「窗口背后」的宿主内容，抓不到同窗口的兄弟，
+     * 所以半透明面板会让键盘按键清晰透出来、和工具内容重叠。
+     *
+     * 这里不动面板透明度（用户要求保留透明+模糊），而是在工具页可见期间
+     * 把这些兄弟 View 的 alpha 置 0 —— 键盘内容消失，露出键盘那层 0x66 Monet 底 + 模糊；
+     * 工具页关闭时逐个恢复。
+     */
+    private fun hookToolboxToggle(module: XposedModule, loader: ClassLoader) {
+        val method = HookFinder.method(loader, HookPoints.INPUT_VIEW_ROOT, HookPoints.toolboxToggle()) ?: run {
+            module.log(Log.WARN, TAG, "toolbox toggle not found, skip isolate")
+            return
+        }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                try {
+                    val show = chain.getArg(1) == true
+                    val root = chain.thisObject
+                    Handler(Looper.getMainLooper()).post { isolateKeyboardForToolbox(root, show, module) }
+                } catch (t: Throwable) {
+                    module.log(Log.WARN, TAG, "toolbox isolate post failed: $t")
+                }
+                result
+            }
+        module.log(Log.INFO, TAG, "toolbox toggle hook installed via ${method.name}")
+    }
+
+    private val hiddenSiblingAlpha = HashMap<View, Float>()
+
+    private fun isolateKeyboardForToolbox(root: Any, show: Boolean, module: XposedModule) {
+        try {
+            val host = findToolboxHost(root) ?: return
+            val (container, toolbox) = host
+            for (i in 0 until container.childCount) {
+                val child = container.getChildAt(i)
+                if (child === toolbox) continue
+                if (show) {
+                    if (child.alpha != 0f) {
+                        hiddenSiblingAlpha[child] = child.alpha
+                        child.alpha = 0f
+                    }
+                } else {
+                    hiddenSiblingAlpha.remove(child)?.let { child.alpha = it }
+                }
+            }
+            if (show) applyToolboxSurface(toolbox, module)
+            module.log(
+                Log.INFO, TAG,
+                "toolbox isolate show=$show container=${container.childCount} hidden=${hiddenSiblingAlpha.size}"
+            )
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "toolbox isolate failed: $t")
+        }
+    }
+
+    /** 反射扫 InputViewRoot 的 ViewGroup 字段，找直接包含 ToolboxKeyboardView 的那个容器。 */
+    private fun findToolboxHost(root: Any): Pair<ViewGroup, View>? {
+        for (f in root.javaClass.declaredFields) {
+            if (!ViewGroup::class.java.isAssignableFrom(f.type)) continue
+            f.isAccessible = true
+            val group = try { f.get(root) as? ViewGroup } catch (_: Throwable) { null } ?: continue
+            for (i in 0 until group.childCount) {
+                val child = group.getChildAt(i)
+                if (child.javaClass.name == HookPoints.TOOLBOX) return group to child
+            }
+        }
+        return null
     }
 
     private fun hookToolboxKeyboardView(module: XposedModule, loader: ClassLoader) {

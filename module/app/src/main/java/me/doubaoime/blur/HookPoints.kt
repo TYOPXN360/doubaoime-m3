@@ -70,6 +70,20 @@ internal object HookPoints {
         .name("setLabel").paramCount(1).addParamType("java.lang.String")
 
     /**
+     * 工具箱显示/隐藏的唯一入口（InputViewRoot 里 `F0(String, boolean)`）。
+     *
+     * 结构特征：String + boolean → void，且方法体同时出现
+     *   - ViewGroup.addView(View, LayoutParams)
+     *   - ToolboxKeyboardView.setStatusGuide(...)
+     * 1.5.3 实测唯一命中。
+     */
+    fun toolboxToggle(): MethodMatcher = MethodMatcher.create()
+        .paramTypes("java.lang.String", "boolean")
+        .returnType("void")
+        .addInvoke("Landroid/view/ViewGroup;->addView(Landroid/view/View;Landroid/view/ViewGroup\$LayoutParams;)V")
+        .addInvoke("Lcom/bytedance/common_biz/tool_box/ToolboxKeyboardView;->setStatusGuide(Lcom/bytedance/common_biz/tool_box/h;)V")
+
+    /**
      * 工具箱视图刷新。1.5.3：`q(Lcom/bytedance/common_biz/tool_box/i;)V`
      *
      * 收敛条件只用非混淆特征：单参 void，且自身不碰 View.setBackground
