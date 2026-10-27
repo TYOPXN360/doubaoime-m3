@@ -623,21 +623,17 @@ internal object ImeBlurHook {
         } else {
             (raw and 0x00ffffff) or (0x99 shl 24)
         }
-        // 工具箱与键盘在同一个窗口里，BackgroundBlurDrawable 只模糊窗口背后的宿主画面，
-        // 抓不到同窗口内的键盘 —— 所以半透明会让键盘按键清晰透出来、和工具内容重叠。
-        // 这里用不透明底把键盘完全挡住；视觉层次靠上面的 Monet 色调区分即可。
-        val surface = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            setColor((color and 0x00ffffff) or (0xFF shl 24))
-        }
-        root.background = surface
+        // 这个 View 位于键盘背景（0x66 Monet 底）之上。
+        // 再铺一层 0x99 的色会叠加成更深的颜色，导致和键盘背景不一致 ——
+        // 所以这里保持透明，直接让键盘那层背景透上来，颜色和模糊自然一致。
+        root.background = ColorDrawable(0x00000000)
         if (root is ViewGroup && root.childCount > 0) root.getChildAt(0).background = null
         val packageName = root.context.packageName
         listOf("toolbox_header_container", "toolbox_content_container").forEach { name ->
             val id = root.resources.getIdentifier(name, "id", packageName)
             if (id != 0) root.findViewById<View>(id)?.background = null
         }
-        module.log(Log.INFO, TAG, "applied opaque toolbox surface ${root.width}x${root.height} dark=$dark")
+        module.log(Log.INFO, TAG, "kept toolbox surface transparent ${root.width}x${root.height} dark=$dark")
     }
 
     private fun hookPopupWindowBlur(module: XposedModule) {
