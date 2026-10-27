@@ -1106,14 +1106,23 @@ internal object ImeBlurHook {
         }
     }
 
+    /**
+     * 隐藏兄弟视图。只把 alpha 置 0 是不够的 —— alpha=0 的 View 照样吃触摸事件，
+     * 表现为"点关闭键却触发底下那层的按钮"。所以同时设 INVISIBLE：
+     * 布局占位不变（不像 GONE 会重排），但不再参与事件分发。
+     */
     private fun hideOrRestoreAlpha(view: View, show: Boolean) {
         if (show) {
-            if (view.alpha != 0f) {
+            if (view.visibility == View.VISIBLE) {
                 hiddenSiblingAlpha[view] = view.alpha
                 view.alpha = 0f
+                view.visibility = View.INVISIBLE
             }
         } else {
-            hiddenSiblingAlpha.remove(view)?.let { view.alpha = it }
+            hiddenSiblingAlpha.remove(view)?.let {
+                view.alpha = it
+                view.visibility = View.VISIBLE
+            }
         }
     }
 
