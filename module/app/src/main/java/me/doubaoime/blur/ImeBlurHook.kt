@@ -54,25 +54,27 @@ internal object ImeBlurHook {
         HookFinder.init(apkPath)
         val imeService = loader.loadClass("com.bytedance.android.doubaoime.ImeService")
         hookResourceColors(module)
-        try {
-            hookKeyboardViewFillRect(module, loader)
-            hookKeyboardViewShadow(module, loader)
-            hookKeyboardViewTouchBubble(module, loader)
-            hookInputViewAsrStatus(module, loader)
-            hookAnimatedStatusBackground(module, loader)
-            hookToolboxKeyboardView(module, loader)
-            hookToolboxItemView(module, loader)
-            hookCandidateItemSelected(module, loader)
-        hookOptionItemToolbarRefresh(module, loader)
-        } catch (t: Throwable) {
-            module.log(Log.WARN, TAG, "KeyboardView key hook skipped: $t")
+        // 每个 hook 独立容错：任何一个失配都不能中断后面所有 hook 的安装。
+        // 之前 r2/c(...) 这些 1.5.3 已不存在的方法一抛异常就把后面的全吞了。
+        listOf<Pair<String, () -> Unit>>(
+            // "fillRect" to { hookKeyboardViewFillRect(module, loader) },
+            // "shadow" to { hookKeyboardViewShadow(module, loader) },
+            // "bubble" to { hookKeyboardViewTouchBubble(module, loader) },
+            "toolboxView" to { hookToolboxKeyboardView(module, loader) },
+            "toolboxItem" to { hookToolboxItemView(module, loader) },
+            "candidate" to { hookCandidateItemSelected(module, loader) },
+            // "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
+            "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
+        ).forEach { (name, block) ->
+            try { block() } catch (t: Throwable) {
+                module.log(Log.WARN, TAG, "$name hook skipped: $t")
+            }
         }
         hookCreateInputView(module, imeService)
         hookStartInputView(module, imeService)
         hookToolbarBackgroundProbe(module)
         hookToolbarBackgroundColorOverride(module)
         hookToolbarBackgroundResourceOverride(module)
-        hookInputViewRootToolboxProbe(module, loader)
     }
 
     private fun hookToolbarBackgroundProbe(module: XposedModule) {
@@ -461,34 +463,43 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "InputViewRoot ASR status hook installed")
     }
 
+    /**
+     * 第一个候选字的背景改成系统强调色。
+     *
+     * 1.5.3 的选中态方法 b(I)：index==1 时用 ContextCompat.getDrawable
+     * (bg_candidate_item_highlighted) 设背景，深色模式下该 drawable 是品牌蓝 #cc4f84ff。
+     *
+     * 关键：不能用 view.background = ...，那会重入被 hook 的 View.setBackground，
+     * 造成递归并最终把强调色刷满整屏。这里只给现有 drawable 加 tint。
+     */
     private fun hookCandidateItemSelected(module: XposedModule, loader: ClassLoader) {
-        val itemClass = loader.loadClass("com.bytedance.common_biz.tool_bar.view.widgets.CandidateItemView")
-        val method = itemClass.getDeclaredMethod("o", Int::class.javaPrimitiveType).apply { isAccessible = true }
+        val method = HookFinder.method(loader, HookPoints.CANDIDATE_ITEM, HookPoints.candidateSelected())
+        if (method == null) {
+            module.log(Log.WARN, TAG, "candidate selected method not found")
+            return
+        }
         module.hook(method)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val result = chain.proceed()
                 try {
-                    val view = chain.thisObject as View
-                    val index = chain.getArg(0) as Int
-                    if (index == 1) {
-                        // 第一个选中词：背景改为 Monet 亮色高亮（accent1_200 亮蓝 #8FCFF3 风格），带圆角 + 半透明模糊
+                    if (chain.getArg(0) as Int == 1) {
+                        val view = chain.thisObject as View
                         MonetEngine.ensureInitialized(view.context)
-                        val color = MonetEngine.accentHighlightColor
-                        val bg = GradientDrawable().apply {
-                            shape = GradientDrawable.RECTANGLE
-                            cornerRadius = 6f * view.resources.displayMetrics.density
-                            setColor(color)
+                        val accent = MonetEngine.accentColor
+                        val bg = view.background
+                        if (bg != null) {
+                            // tint 不经过 setBackground，不会重入
+                            bg.setTint(accent)
+                            bg.invalidateSelf()
                         }
-                        view.background = bg
-                        module.log(Log.INFO, TAG, "candidate #1 highlight Monet color=#${Integer.toHexString(color)}")
                     }
                 } catch (t: Throwable) {
-                    module.log(Log.WARN, TAG, "candidate accent hook failed: $t")
+                    module.log(Log.WARN, TAG, "candidate accent failed: $t")
                 }
                 result
             }
-        module.log(Log.INFO, TAG, "candidate item accent hook installed")
+        module.log(Log.INFO, TAG, "candidate #1 accent hook installed via ${method.name}")
     }
 
     private fun hookToolbarPageBlur(module: XposedModule, loader: ClassLoader) {
