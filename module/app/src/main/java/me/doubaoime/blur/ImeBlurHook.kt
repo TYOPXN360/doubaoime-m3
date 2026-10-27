@@ -57,14 +57,14 @@ internal object ImeBlurHook {
         // 每个 hook 独立容错：任何一个失配都不能中断后面所有 hook 的安装。
         // 之前 r2/c(...) 这些 1.5.3 已不存在的方法一抛异常就把后面的全吞了。
         listOf<Pair<String, () -> Unit>>(
-            // "fillRect" to { hookKeyboardViewFillRect(module, loader) },
-            // "shadow" to { hookKeyboardViewShadow(module, loader) },
-            // "bubble" to { hookKeyboardViewTouchBubble(module, loader) },
+            "fillRect" to { hookKeyboardViewFillRect(module, loader) },
+            "shadow" to { hookKeyboardViewShadow(module, loader) },
+            "bubble" to { hookKeyboardViewTouchBubble(module, loader) },
             "toolboxView" to { hookToolboxKeyboardView(module, loader) },
-            // "toolboxItem" to { hookToolboxItemView(module, loader) },
+            "toolboxItem" to { hookToolboxItemView(module, loader) },
             "candidate" to { hookCandidateItemSelected(module, loader) },
-            // "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
-            // "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
+            "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
+            "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
                 module.log(Log.WARN, TAG, "$name hook skipped: $t")
