@@ -55,6 +55,10 @@ internal object ImeBlurHook {
         "clipboard_common_phrase_toolbar",
         "common_phrase_toolbar",
         "common_phrase_empty",
+        // 手写找字界面
+        "lookup_tool_bar_placeholder",
+        "lookup_write_filler",
+        "lookup_btn_key_layout",
     )
     private const val BLUR_RADIUS = 20
     private const val CORNER_RADIUS = 0f
@@ -90,6 +94,7 @@ internal object ImeBlurHook {
             "emojiToggle" to { hookEmojiToggle(module, loader) },
             "emojiBar" to { hookEmojiSegmentedBar(module, loader) },
             "clipboardDismiss" to { hookClipboardDismiss(module, loader) },
+            "overlayVisibility" to { hookOverlayVisibility(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
                 module.log(Log.WARN, TAG, "$name hook skipped: $t")
@@ -108,6 +113,10 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val view = chain.thisObject as View
+                if (lookupKeyViews.contains(view)) {
+                    // 找字界面的键自己会在按下/抬起时重设键帽，这里换成 Monet 版本，避免按住露出灰底
+                    return@intercept chain.proceed(arrayOf<Any>(lookupKeyDrawable(view)))
+                }
                 val drawable = chain.getArg(0) as? Drawable
                 val color = (drawable as? ColorDrawable)?.color
                 val idName = try {
@@ -149,9 +158,9 @@ internal object ImeBlurHook {
         return n
     }
 
+    private val lookupKeyViews = java.util.Collections.newSetFromMap(java.util.WeakHashMap<View, Boolean>())
     private var clipBar: View? = null
     private var clipContainer: View? = null
-    private var clipHookInstalled = false
 
     /**
      * 复制内容后输入法会在工具栏那一行弹出剪贴板提示（ImeToolBarContainer），
@@ -176,21 +185,6 @@ internal object ImeBlurHook {
         }
         syncClipboardToolbar(module)
 
-        if (!clipHookInstalled) {
-            clipHookInstalled = true
-            try {
-                val method = View::class.java.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType)
-                module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-                    if (chain.thisObject !== clipContainer) return@intercept chain.proceed()
-                    val result = chain.proceed()
-                    syncClipboardToolbar(module)
-                    result
-                }
-                module.log(Log.INFO, TAG, "clipboard visibility hook installed")
-            } catch (t: Throwable) {
-                module.log(Log.WARN, TAG, "clipboard visibility hook failed: $t")
-            }
-        }
     }
 
     private fun syncClipboardToolbar(module: XposedModule) {
@@ -204,6 +198,102 @@ internal object ImeBlurHook {
             bar.alpha = target
             val cleared = if (showing) clearDoubleTint(container, module) else 0
             module.log(Log.INFO, TAG, "clipboard toolbar showing=$showing candidateBarAlpha=$target clearedTint=$cleared")
+        }
+    }
+
+    /**
+     * 统一的浮层可见性钩子：剪贴板提示条、手写找字面板都会走 View.setVisibility。
+     * 手写找字面板（HandWritingLookupBoardView）和 soft_view 是 keyboard_main_container_area
+     * 的兄弟且同尺寸，半透明时下面键盘按键全透上来，所以显示期间要把兄弟清掉。
+     */
+    private fun hookOverlayVisibility(module: XposedModule, loader: ClassLoader) {
+        val lookupCls = loader.loadClass(HookPoints.HANDWRITING_LOOKUP)
+        val method = View::class.java.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType).apply { isAccessible = true }
+        module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
+            val self = chain.thisObject
+            val result = chain.proceed()
+            val v = self as? View
+            if (v != null) {
+                if (lookupCls.isInstance(v)) {
+                    val show = v.visibility == View.VISIBLE
+                    isolateSiblings(v, show, module, "lookup", keep = setOf("native_candidate_bar"))
+                    if (show) clearLookupSurface(v, module)
+                } else if (v === clipContainer) {
+                    syncClipboardToolbar(module)
+                }
+            }
+            result
+        }
+        module.log(Log.INFO, TAG, "overlay visibility hook installed")
+    }
+
+    private fun isolateSiblings(
+        target: View,
+        show: Boolean,
+        module: XposedModule,
+        tag: String,
+        keep: Set<String> = emptySet(),
+    ) {
+        val container = target.parent as? ViewGroup ?: return
+        for (i in 0 until container.childCount) {
+            val c = container.getChildAt(i)
+            if (c === target) continue
+            val name = try { if (c.id == View.NO_ID) "" else c.resources.getResourceEntryName(c.id) } catch (_: Throwable) { "" }
+            // keep 里的（候选字栏）不但不能藏，还要强制还原
+            hideOrRestoreAlpha(c, if (name in keep) false else show)
+        }
+        module.log(Log.INFO, TAG, "$tag isolate show=$show hidden=${hiddenSiblingAlpha.size}")
+    }
+
+    /** 找字界面底部那排键（返回/重输/空格/删除/确定）的键帽是 LayerDrawable，换成 Monet 强调色。 */
+    private fun tintLookupKey(view: View, module: XposedModule) {
+        try {
+            lookupKeyViews.add(view)
+            view.background = lookupKeyDrawable(view)
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "lookup key tint failed: $t")
+        }
+    }
+
+    private fun lookupKeyDrawable(view: View): Drawable {
+        val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val raw = monetColor(view, if (dark) "system_accent1_800" else "system_accent1_100")
+        val base = if (raw == 0) {
+            if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
+        } else raw
+        return GradientDrawable().apply {
+            setShape(GradientDrawable.RECTANGLE)
+            cornerRadius = view.resources.displayMetrics.density * 8f
+            setColor(withAlpha(base, if (view.isPressed) 0x99 else 0x66))
+        }
+    }
+
+    private fun clearLookupSurface(root: View, module: XposedModule) {
+        try {
+            listOf("lookup_tool_bar_placeholder", "lookup_write_filler", "lookup_btn_key_layout").forEach { name ->
+                val id = root.resources.getIdentifier(name, "id", root.context.packageName)
+                if (id != 0) root.findViewById<View>(id)?.background = ColorDrawable(0x00000000)
+            }
+            val keysId = root.resources.getIdentifier("lookup_btn_key_layout", "id", root.context.packageName)
+            if (keysId != 0) {
+                val keys = root.findViewById<ViewGroup>(keysId)
+                if (keys != null) {
+                    // 此时按键还没测量完（width=0），等一帧布局过完再上色
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        var n = 0
+                        for (i in 0 until keys.childCount) {
+                            val c = keys.getChildAt(i)
+                            if (c.width == 0) continue
+                            tintLookupKey(c, module)
+                            n++
+                        }
+                        module.log(Log.INFO, TAG, "lookup keys tinted n=$n")
+                    }, 80)
+                }
+            }
+            module.log(Log.INFO, TAG, "lookup surface cleared")
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "lookup surface failed: $t")
         }
     }
 
