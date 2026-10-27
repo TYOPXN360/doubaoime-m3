@@ -245,9 +245,9 @@ internal object ImeBlurHook {
             if (c === target) continue
             val name = try { if (c.id == View.NO_ID) "" else c.resources.getResourceEntryName(c.id) } catch (_: Throwable) { "" }
             // keep 里的（候选字栏）不但不能藏，还要强制还原
-            hideOrRestoreAlpha(c, if (name in keep) false else show)
+            hideOrRestoreAlpha(c, if (name in keep) false else show, tag)
         }
-        module.log(Log.INFO, TAG, "$tag isolate show=$show hidden=${hiddenSiblingAlpha.size}")
+        module.log(Log.INFO, TAG, "$tag isolate show=$show hidden=${hiddenByTag[tag]?.size ?: 0}")
     }
 
     /** 找字界面底部那排键（返回/重输/空格/删除/确定）的键帽是 LayerDrawable，换成 Monet 强调色。 */
@@ -854,7 +854,8 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "toolbox toggle hook installed via ${method.name}")
     }
 
-    private val hiddenSiblingAlpha = HashMap<View, Float>()
+    // 按面板分桶记录：多个浮层共用一张表会互相踩（A 关掉时把 B 刚藏起来的键盘又恢复回来）
+    private val hiddenByTag = HashMap<String, HashMap<View, Float>>()
 
     private fun hookEmojiToggle(module: XposedModule, loader: ClassLoader) {
         val method = HookFinder.method(loader, HookPoints.INPUT_VIEW_ROOT, HookPoints.emojiToggle()) ?: run {
@@ -1116,20 +1117,20 @@ internal object ImeBlurHook {
             for (i in 0 until container.childCount) {
                 val child = container.getChildAt(i)
                 if (child === target) continue
-                hideOrRestoreAlpha(child, show)
+                hideOrRestoreAlpha(child, show, tag)
                 count++
             }
             // 顶部工具栏在另一个容器里，单独处理
             val bar = findViewByName(root as? View, "native_candidate_bar")
             if (bar != null && bar !== target) {
-                hideOrRestoreAlpha(bar, show)
+                hideOrRestoreAlpha(bar, show, tag)
                 count++
             }
             if (show && targetClass == HookPoints.TOOLBOX) applyToolboxSurface(target, module)
             if (show && targetClass == HookPoints.EMOJI_LAYOUT) applyEmojiSurface(target, module)
             module.log(
                 Log.INFO, TAG,
-                "$tag isolate show=$show container=${container.childCount} touched=$count hidden=${hiddenSiblingAlpha.size}"
+                "$tag isolate show=$show container=${container.childCount} touched=$count hidden=${hiddenByTag[tag]?.size ?: 0}"
             )
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "$tag isolate failed: $t")
@@ -1141,15 +1142,16 @@ internal object ImeBlurHook {
      * 表现为"点关闭键却触发底下那层的按钮"。所以同时设 INVISIBLE：
      * 布局占位不变（不像 GONE 会重排），但不再参与事件分发。
      */
-    private fun hideOrRestoreAlpha(view: View, show: Boolean) {
+    private fun hideOrRestoreAlpha(view: View, show: Boolean, tag: String) {
+        val bucket = hiddenByTag.getOrPut(tag) { HashMap() }
         if (show) {
             if (view.visibility == View.VISIBLE) {
-                hiddenSiblingAlpha[view] = view.alpha
+                bucket[view] = view.alpha
                 view.alpha = 0f
                 view.visibility = View.INVISIBLE
             }
         } else {
-            hiddenSiblingAlpha.remove(view)?.let {
+            bucket.remove(view)?.let {
                 view.alpha = it
                 view.visibility = View.VISIBLE
             }
