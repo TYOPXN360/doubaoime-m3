@@ -216,6 +216,17 @@ internal object ImeBlurHook {
             val result = chain.proceed()
             val v = self as? View
             if (v != null) {
+                if (v.javaClass.simpleName == "KeyboardView" && v.visibility == View.VISIBLE) {
+                    // 应用自己把键盘放回来了：撤掉我们加的隐藏标记。
+                    // 不然会残留 INVISIBLE —— 表现为松开语音键后仍停在"按住"状态，
+                    // 后续的 UP 事件根本到不了键盘。
+                    var n = 0
+                    hiddenByTag.values.forEach { if (it.remove(v) != null) n++ }
+                    if (n > 0) {
+                        v.alpha = 1f
+                        module.log(Log.INFO, TAG, "keyboard shown by app, cleared hidden marks n=$n")
+                    }
+                }
                 if (lookupCls.isInstance(v) || boardCls.isInstance(v)) {
                     val show = v.visibility == View.VISIBLE
                     isolateSiblings(v, show, module, "handwrite", keep = setOf("native_candidate_bar"))
