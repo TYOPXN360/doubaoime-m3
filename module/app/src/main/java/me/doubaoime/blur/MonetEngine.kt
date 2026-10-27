@@ -56,6 +56,9 @@ object MonetEngine {
     @Volatile
     private var initialized = false
 
+    /** 是否已完成取色。绘制热路径据此跳过反射找 context。 */
+    fun isReady(): Boolean = initialized
+
     private var appContext: Context? = null
 
     /** 惰性初始化：首次调用时确保只初始化一次，context 可用 */

@@ -286,17 +286,12 @@ internal object ImeBlurHook {
                     val h = bottom - top
                     val r = Color.red(color); val g = Color.green(color); val b = Color.blue(color)
                     val isBlue = b > r + 20 && b > g + 10
-                    // 诊断：打印所有蓝色矩形（不论尺寸），看搜索键走哪条路径
-                    if (isBlue && Color.alpha(color) >= 0x80) {
-                        module.log(Log.INFO, TAG, "BLUE-RECT [${left.toInt()},${top.toInt()}] ${w.toInt()}x${h.toInt()} color=#${Integer.toHexString(color)}")
-                    }
                     if (w in 40f..1000f && h in 30f..500f && color != 0 && Color.alpha(color) > 0x30) {
                         // 官方按压高亮（蓝色系+低透明）保留；品牌蓝色（高透明）替换为功能键色
                         val alpha = Color.alpha(color)
                         val isPressHighlight = isBlue && alpha < 0x80
                         if (!isPressHighlight) {
                             val repl = translucentGboardKeyColor(color, w.toInt(), left.toInt(), top.toInt(), Resources.getSystem())
-                            module.log(Log.INFO, TAG, "drawKey [${left.toInt()},${top.toInt()}] ${w.toInt()}x${h.toInt()} orig=#${Integer.toHexString(color)} -> repl=#${Integer.toHexString(repl)}")
                             // 关键：每次按键绘制都清 shader/colorFilter/maskFilter/xfermode，并用 SRC 直接覆盖——
                             // 普通键画在键盘模糊 buffer 上，SRC 直接覆盖像素不叠加，才能和功能键（单层）一致，
                             // 否则半透明+SRC_OVER 在浅色宿主上会叠出浑浊色！
@@ -336,15 +331,11 @@ internal object ImeBlurHook {
                     val h = rf.bottom - rf.top
                     val r = Color.red(color); val g = Color.green(color); val b = Color.blue(color)
                     val isBlue = b > r + 20 && b > g + 10
-                    if (isBlue && Color.alpha(color) >= 0x80) {
-                        module.log(Log.INFO, TAG, "BLUE-RECT4 [${rf.left.toInt()},${rf.top.toInt()}] ${w.toInt()}x${h.toInt()} color=#${Integer.toHexString(color)}")
-                    }
                     if (w in 40f..1000f && h in 30f..500f && color != 0 && Color.alpha(color) > 0x30) {
                         val alpha = Color.alpha(color)
                         val isPressHighlight = isBlue && alpha < 0x80
                         if (!isPressHighlight) {
                             val repl = translucentGboardKeyColor(color, w.toInt(), rf.left.toInt(), rf.top.toInt(), Resources.getSystem())
-                            module.log(Log.INFO, TAG, "drawKey4 [${rf.left.toInt()},${rf.top.toInt()}] ${w.toInt()}x${h.toInt()} orig=#${Integer.toHexString(color)} -> repl=#${Integer.toHexString(repl)}")
                             // 每次绘制都清 shader/colorFilter/maskFilter，并 SRC 直接覆盖
                             paint.shader = null
                             paint.colorFilter = null
@@ -366,32 +357,6 @@ internal object ImeBlurHook {
         } catch (_: Throwable) {}
         module.log(Log.INFO, TAG, "KeyboardView drawRoundRect hook installed (fillRect 官方按压保留)")
 
-        // 诊断：hook drawPath/drawRect/drawColor，看普通键是否还有别的绘制层（可能叠出浑浊）
-        try {
-            val drawPath = android.graphics.Canvas::class.java.getDeclaredMethod("drawPath", android.graphics.Path::class.java, android.graphics.Paint::class.java)
-            module.hook(drawPath).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-                val paint = chain.getArg(1) as android.graphics.Paint
-                val c = paint.color
-                if (Color.alpha(c) > 0x30) {
-                    module.log(Log.INFO, TAG, "DRAW-PATH color=#${Integer.toHexString(c)} sh=${paint.shader?.javaClass?.simpleName}")
-                }
-                chain.proceed()
-            }
-        } catch (_: Throwable) {}
-        try {
-            val drawRect = android.graphics.Canvas::class.java.getDeclaredMethod("drawRect", Float::class.javaPrimitiveType, Float::class.javaPrimitiveType, Float::class.javaPrimitiveType, Float::class.javaPrimitiveType, android.graphics.Paint::class.java)
-            module.hook(drawRect).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-                val paint = chain.getArg(4) as android.graphics.Paint
-                val c = paint.color
-                val left = chain.getArg(0) as Float
-                val top = chain.getArg(1) as Float
-                if (Color.alpha(c) > 0x30) {
-                    module.log(Log.INFO, TAG, "DRAW-RECT [${left.toInt()},${top.toInt()}] color=#${Integer.toHexString(c)} sh=${paint.shader?.javaClass?.simpleName}")
-                }
-                chain.proceed()
-            }
-        } catch (_: Throwable) {}
-        module.log(Log.INFO, TAG, "Canvas drawPath/drawRect diagnostic hooks installed")
     }
 
     private fun hookKeyboardViewShadow(module: XposedModule, loader: ClassLoader) {
@@ -814,10 +779,12 @@ internal object ImeBlurHook {
     }
 
     private fun translucentGboardKeyColor(original: Int, width: Int, left: Int, top: Int, resources: Resources): Int {
-        // 延迟初始化：确保 MonetEngine 已用 MaterialKolor 取色（首次绘制时触发）
-        try {
-            MonetEngine.ensureInitialized(contextFromResources(resources))
-        } catch (_: Throwable) {}
+        // 只在未初始化时才反射找 context：每次绘制都反射会直接卡住打字
+        if (!MonetEngine.isReady()) {
+            try {
+                MonetEngine.ensureInitialized(contextFromResources(resources))
+            } catch (_: Throwable) {}
+        }
         val r = Color.red(original)
         val g = Color.green(original)
         val b = Color.blue(original)
@@ -860,9 +827,13 @@ internal object ImeBlurHook {
             }
     }
 
+    /** 资源 id → 角色缓存。getColor 是输入法最热的 API，每次 JNI 查名会拖垮打字。 */
+    private val roleCache = HashMap<Int, Role?>()
+
     private fun resolveKeyColor(resources: Resources, id: Int): Int? {
-        val name = try { resources.getResourceEntryName(id) } catch (_: Throwable) { return null }
-        val role = when (name) {
+        val role = if (roleCache.containsKey(id)) roleCache[id] else {
+            val name = try { resources.getResourceEntryName(id) } catch (_: Throwable) { null }
+            val r = when (name) {
             "ime_animated_status_bg" -> return 0x00000000
             "ime_key_normal_bg_color" -> Role.KEY
             "ime_key_normal_press_bg_color" -> Role.KEY_PRESSED
@@ -873,9 +844,12 @@ internal object ImeBlurHook {
             "ime_key_text_clickable_color" -> Role.FOREGROUND
             "ime_key_text_un_clickable_color", "ime_key_hint_text_color", "ime_space_button_text_color" -> Role.FOREGROUND_MUTED
             "ime_key_shadow_color" -> Role.SHADOW
-            else -> return null
+            else -> null
+            }
+            roleCache[id] = r
+            r
         }
-        return role.color(resources)
+        return role?.color(resources)
     }
 
     private enum class Role {
@@ -906,7 +880,7 @@ internal object ImeBlurHook {
                 else -> "system_neutral1_800"
             }
             val id = resources.getIdentifier(name, "color", "android")
-            val base = if (id == 0) 0 else resources.getColor(id)
+            val base = if (id == 0) 0 else Resources.getSystem().getColor(id)
             return base
         }
     }
