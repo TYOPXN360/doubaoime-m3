@@ -376,41 +376,29 @@ internal object ImeBlurHook {
     }
 
     private fun hookKeyboardViewTouchBubble(module: XposedModule, loader: ClassLoader) {
-        val keyboardView = loader.loadClass("com.bytedance.android.input.keyboard.KeyboardView")
-        val bubble = keyboardView.getDeclaredMethod(
-            "drawTouchTipBubble",
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType
-        ).apply { isAccessible = true }
-        module.hook(bubble)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val args = chain.args.toTypedArray()
-                val monet = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
-                args[10] = (monet and 0x00ffffff) or (0x88 shl 24)
-                chain.proceed(args)
-            }
-            val shadow = keyboardView.getDeclaredMethod(
-                "drawTouchTipBubbleShadow",
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Float::class.javaPrimitiveType, Float::class.javaPrimitiveType,
-            Int::class.javaPrimitiveType, Float::class.javaPrimitiveType
-        ).apply { isAccessible = true }
-        module.hook(shadow)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val args = chain.args.toTypedArray()
-                args[10] = (args[10] as Int and 0x00ffffff) or (0x28 shl 24)
-                chain.proceed(args)
-            }
-        module.log(Log.INFO, TAG, "KeyboardView long-press bubble Monet hook installed")
+        val bubble = HookFinder.method(loader, HookPoints.KEYBOARD_VIEW, HookPoints.touchBubble())
+        if (bubble != null) {
+            module.hook(bubble)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept { chain ->
+                    val args = chain.args.toTypedArray()
+                    val monet = monetPopupColor(args[10] as Int, (chain.thisObject as View).resources)
+                    args[10] = (monet and 0x00ffffff) or (0x88 shl 24)
+                    chain.proceed(args)
+                }
+        } else module.log(Log.WARN, TAG, "touch bubble not found")
+
+        val shadow = HookFinder.method(loader, HookPoints.KEYBOARD_VIEW, HookPoints.touchBubbleShadow())
+        if (shadow != null) {
+            module.hook(shadow)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept { chain ->
+                    val args = chain.args.toTypedArray()
+                    args[10] = (args[10] as Int and 0x00ffffff) or (0x28 shl 24)
+                    chain.proceed(args)
+                }
+        } else module.log(Log.WARN, TAG, "touch bubble shadow not found")
+        module.log(Log.INFO, TAG, "long-press bubble hooks resolved")
     }
 
     private fun hookAnimatedStatusBackground(module: XposedModule, loader: ClassLoader) {
