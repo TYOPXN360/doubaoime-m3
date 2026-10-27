@@ -584,8 +584,10 @@ internal object ImeBlurHook {
     }
 
     private fun hookToolboxItemView(module: XposedModule, loader: ClassLoader) {
-        val item = loader.loadClass("com.bytedance.common_biz.tool_box.ToolboxItemView")
-        val method = item.getDeclaredMethod("d").apply { isAccessible = true }
+        val method = HookFinder.method(loader, HookPoints.TOOLBOX_ITEM, HookPoints.toolboxItemRefresh()) ?: run {
+            module.log(Log.WARN, TAG, "ToolboxItemView refresh not found")
+            return
+        }
         module.hook(method)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
