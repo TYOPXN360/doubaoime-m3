@@ -36,4 +36,5 @@ android {
 dependencies {
     compileOnly(libs.libxposed.api)
     implementation(libs.materialkolor.utilities)
+    implementation(libs.dexkit)
 }

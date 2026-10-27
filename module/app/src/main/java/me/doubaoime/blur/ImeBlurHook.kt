@@ -40,7 +40,7 @@ internal object ImeBlurHook {
     private var keyboardWholeBlurred = false
     private var toolbarBackgroundApplying = false
 
-    fun install(loader: ClassLoader, module: XposedModule) {
+    fun install(loader: ClassLoader, module: XposedModule, apkPath: String) {
         if (Build.VERSION.SDK_INT < 31) {
             module.log(Log.INFO, TAG, "BackgroundBlurDrawable requires Android 12+")
             return
@@ -51,6 +51,7 @@ internal object ImeBlurHook {
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "MonetEngine init skipped (lazy init will retry): $t")
         }
+        HookFinder.init(apkPath)
         val imeService = loader.loadClass("com.bytedance.android.doubaoime.ImeService")
         hookResourceColors(module)
         try {

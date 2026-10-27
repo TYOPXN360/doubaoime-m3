@@ -8,7 +8,7 @@ class DoubaoImeBlurModule : XposedModule() {
     override fun onPackageLoaded(param: PackageLoadedParam) {
         if (param.packageName != TARGET_PACKAGE) return
         try {
-            ImeBlurHook.install(param.defaultClassLoader, this)
+            ImeBlurHook.install(param.defaultClassLoader, this, param.applicationInfo?.sourceDir ?: return)
             log(Log.INFO, TAG, "blur hook installed for ${param.packageName}")
         } catch (t: Throwable) {
             log(Log.ERROR, TAG, "blur hook installation failed: $t")
