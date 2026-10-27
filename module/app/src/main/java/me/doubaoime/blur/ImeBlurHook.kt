@@ -36,6 +36,22 @@ import java.lang.reflect.Method
 
 internal object ImeBlurHook {
     private const val TAG = "DoubaoImeBlur"
+    private const val MONET_BG_ID = "keyboard_whole"
+
+    /**
+     * 底板自己已经是 0x66 强调色，这些子面板再叠一层就成了双层强调色（明显变深）。
+     * asr_visualizer_ll 就是语音识别完的"识别优化中"那条，必须透明。
+     */
+    private val TRANSPARENT_BG_IDS = setOf(
+        "native_candidate_bar",
+        "keyboard_main_container_area",
+        "keyboard_whole_board_area",
+        "idle_tip_content",
+        "idle_tip_status",
+        "status_content",
+        "status_message",
+        "asr_visualizer_ll",
+    )
     private const val BLUR_RADIUS = 20
     private const val CORNER_RADIUS = 0f
     private var keyboardWholeBlurred = false
@@ -97,7 +113,10 @@ internal object ImeBlurHook {
                 if (color != null && idName !in setOf("-", "")) {
                     module.log(Log.INFO, TAG, "setBackground view=$cls id=$idName color=#${Integer.toHexString(color)}")
                 }
-                if (color == 0xff222222.toInt()) {
+                if (idName in TRANSPARENT_BG_IDS) {
+                    module.log(Log.INFO, TAG, "kept bg transparent over Monet body id=$idName")
+                    chain.proceed(arrayOf<Any>(ColorDrawable(0x00000000)))
+                } else if (color == 0xff222222.toInt()) {
                     val replacement = globalMonetSurface(view.resources)
                     module.log(Log.INFO, TAG, "setBackground #222222 -> #${Integer.toHexString(replacement)} view=$cls id=$idName")
                     chain.proceed(arrayOf<Any>(ColorDrawable(replacement)))
@@ -115,7 +134,10 @@ internal object ImeBlurHook {
             .intercept { chain ->
                 val view = chain.thisObject as View
                 val originalColor = chain.getArg(0) as Int
-                val color = if (originalColor == 0xff222222.toInt()) {
+                val earlyId = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
+                val color = if (earlyId in TRANSPARENT_BG_IDS && earlyId != MONET_BG_ID) {
+                    0
+                } else if (originalColor == 0xff222222.toInt()) {
                     val idName = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
                     val replacement = globalMonetSurface(view.resources)
                     module.log(Log.INFO, TAG, "intercepted #222222 View.setBackgroundColor id=$idName class=${view.javaClass.name}")
@@ -123,8 +145,8 @@ internal object ImeBlurHook {
                 } else originalColor
                 val result = if (color == originalColor) chain.proceed() else chain.proceed(arrayOf(color))
                 val idName = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
-                if (idName == "keyboard_whole" || idName == "native_candidate_bar" || idName == "keyboard_main_container_area" || idName == "keyboard_whole_board_area" || idName == "idle_tip_content" || idName == "idle_tip_status" || idName == "status_content" || idName == "status_message") {
-                    if (idName == "keyboard_whole") {
+                if (idName == MONET_BG_ID || idName in TRANSPARENT_BG_IDS) {
+                    if (idName == MONET_BG_ID) {
                         view.background = createMonetColor(view)
                     } else {
                         view.background = ColorDrawable(0x00000000)
@@ -147,8 +169,8 @@ internal object ImeBlurHook {
                 val result = chain.proceed()
                 val view = chain.thisObject as View
                 val idName = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
-                if (idName == "keyboard_whole" || idName == "native_candidate_bar" || idName == "keyboard_main_container_area" || idName == "keyboard_whole_board_area" || idName == "idle_tip_content" || idName == "idle_tip_status" || idName == "status_content" || idName == "status_message") {
-                    view.background = if (idName == "keyboard_whole") createMonetColor(view) else ColorDrawable(0x00000000)
+                if (idName == MONET_BG_ID || idName in TRANSPARENT_BG_IDS) {
+                    view.background = if (idName == MONET_BG_ID) createMonetColor(view) else ColorDrawable(0x00000000)
                     module.log(Log.INFO, TAG, "restored Monet after setBackgroundResource id=$idName")
                 }
                 result
