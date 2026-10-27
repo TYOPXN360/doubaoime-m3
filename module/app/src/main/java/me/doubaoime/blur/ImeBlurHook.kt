@@ -208,6 +208,7 @@ internal object ImeBlurHook {
      */
     private fun hookOverlayVisibility(module: XposedModule, loader: ClassLoader) {
         val lookupCls = loader.loadClass(HookPoints.HANDWRITING_LOOKUP)
+        val boardCls = loader.loadClass(HookPoints.HANDWRITING_BOARD)
         val moreCls = loader.loadClass(HookPoints.MORE_CANDIDATE)
         val method = View::class.java.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType).apply { isAccessible = true }
         module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
@@ -215,10 +216,10 @@ internal object ImeBlurHook {
             val result = chain.proceed()
             val v = self as? View
             if (v != null) {
-                if (lookupCls.isInstance(v)) {
+                if (lookupCls.isInstance(v) || boardCls.isInstance(v)) {
                     val show = v.visibility == View.VISIBLE
-                    isolateSiblings(v, show, module, "lookup", keep = setOf("native_candidate_bar"))
-                    if (show) clearLookupSurface(v, module)
+                    isolateSiblings(v, show, module, "handwrite", keep = setOf("native_candidate_bar"))
+                    if (show) clearHandwritingSurface(v, module)
                 } else if (moreCls.isInstance(v)) {
                     val show = v.visibility == View.VISIBLE
                     isolateSiblings(v, show, module, "moreCandidate")
@@ -248,6 +249,12 @@ internal object ImeBlurHook {
             hideOrRestoreAlpha(c, if (name in keep) false else show, tag)
         }
         module.log(Log.INFO, TAG, "$tag isolate show=$show hidden=${hiddenByTag[tag]?.size ?: 0}")
+    }
+
+    private fun collectKeyComponents(v: View, out: MutableList<View>, depth: Int) {
+        if (depth > 8) return
+        if (v.width > 0 && v.javaClass.simpleName.endsWith("KeyComponent")) out.add(v)
+        if (v is ViewGroup) for (i in 0 until v.childCount) collectKeyComponents(v.getChildAt(i), out, depth + 1)
     }
 
     /** 找字界面底部那排键（返回/重输/空格/删除/确定）的键帽是 LayerDrawable，换成 Monet 强调色。 */
@@ -298,32 +305,23 @@ internal object ImeBlurHook {
         }
     }
 
-    private fun clearLookupSurface(root: View, module: XposedModule) {
+    private fun clearHandwritingSurface(root: View, module: XposedModule) {
         try {
             listOf("lookup_tool_bar_placeholder", "lookup_write_filler", "lookup_btn_key_layout").forEach { name ->
                 val id = root.resources.getIdentifier(name, "id", root.context.packageName)
                 if (id != 0) root.findViewById<View>(id)?.background = ColorDrawable(0x00000000)
             }
-            val keysId = root.resources.getIdentifier("lookup_btn_key_layout", "id", root.context.packageName)
-            if (keysId != 0) {
-                val keys = root.findViewById<ViewGroup>(keysId)
-                if (keys != null) {
-                    // 此时按键还没测量完（width=0），等一帧布局过完再上色
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        var n = 0
-                        for (i in 0 until keys.childCount) {
-                            val c = keys.getChildAt(i)
-                            if (c.width == 0) continue
-                            tintLookupKey(c, module)
-                            n++
-                        }
-                        module.log(Log.INFO, TAG, "lookup keys tinted n=$n")
-                    }, 80)
-                }
-            }
-            module.log(Log.INFO, TAG, "lookup surface cleared")
+            // 手写板/找字板的底部按键都是 *KeyComponent，统一换成 Monet 强调色。
+            // 首次调用时还没测量（width=0），等一帧再收集上色。
+            Handler(Looper.getMainLooper()).postDelayed({
+                val keys = ArrayList<View>()
+                collectKeyComponents(root, keys, 0)
+                keys.forEach { tintLookupKey(it, module) }
+                module.log(Log.INFO, TAG, "handwriting keys tinted n=${keys.size}")
+            }, 80)
+            module.log(Log.INFO, TAG, "handwriting surface cleared")
         } catch (t: Throwable) {
-            module.log(Log.WARN, TAG, "lookup surface failed: $t")
+            module.log(Log.WARN, TAG, "handwriting surface failed: $t")
         }
     }
 

@@ -23,6 +23,7 @@ internal object HookPoints {
     const val TOOLBOX_ITEM = "com.bytedance.common_biz.tool_box.ToolboxItemView"
     const val OPTION_ITEM = "com.bytedance.android.input.OptionItemView"
     const val MORE_CANDIDATE = "com.bytedance.common_biz.more_candidate.MoreCandidateView"
+    const val HANDWRITING_BOARD = "com.bytedance.android.input.keyboard.handwriting.HandWritingBoardView"
     const val HANDWRITING_LOOKUP = "com.bytedance.android.input.keyboard.handwriting.HandWritingLookupBoardView"
     const val EMOJI_LAYOUT = "com.bytedance.android.input.keyboard.emoji.EmojiLayout"
 
