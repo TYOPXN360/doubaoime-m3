@@ -66,6 +66,8 @@ internal object ImeBlurHook {
             "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
             "toolboxProbe" to { hookInputViewRootToolboxProbe(module, loader) },
             "toolboxToggle" to { hookToolboxToggle(module, loader) },
+            "emojiToggle" to { hookEmojiToggle(module, loader) },
+            "emojiBar" to { hookEmojiSegmentedBar(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
                 module.log(Log.WARN, TAG, "$name hook skipped: $t")
@@ -601,41 +603,180 @@ internal object ImeBlurHook {
 
     private val hiddenSiblingAlpha = HashMap<View, Float>()
 
-    private fun isolateKeyboardForToolbox(root: Any, show: Boolean, module: XposedModule) {
-        try {
-            val host = findToolboxHost(root) ?: return
-            val (container, toolbox) = host
-            for (i in 0 until container.childCount) {
-                val child = container.getChildAt(i)
-                if (child === toolbox) continue
-                if (show) {
-                    if (child.alpha != 0f) {
-                        hiddenSiblingAlpha[child] = child.alpha
-                        child.alpha = 0f
-                    }
-                } else {
-                    hiddenSiblingAlpha.remove(child)?.let { child.alpha = it }
+    private fun hookEmojiToggle(module: XposedModule, loader: ClassLoader) {
+        val method = HookFinder.method(loader, HookPoints.INPUT_VIEW_ROOT, HookPoints.emojiToggle()) ?: run {
+            module.log(Log.WARN, TAG, "emoji toggle not found, skip isolate")
+            return
+        }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                try {
+                    val show = chain.getArg(0) == true
+                    val root = chain.thisObject
+                    Handler(Looper.getMainLooper()).post { isolateKeyboardForEmoji(root, show, module) }
+                } catch (t: Throwable) {
+                    module.log(Log.WARN, TAG, "emoji isolate post failed: $t")
                 }
+                result
             }
-            if (show) applyToolboxSurface(toolbox, module)
-            module.log(
-                Log.INFO, TAG,
-                "toolbox isolate show=$show container=${container.childCount} hidden=${hiddenSiblingAlpha.size}"
-            )
+        module.log(Log.INFO, TAG, "emoji toggle hook installed via ${method.name}")
+    }
+
+    /**
+     * 表情面板底部那一栏（笑脸/手势/人物/爱心…）用 SegmentedBar，
+     * 原生背景是灰不透明的 bg_segmented_bar（#0f000000 / night #0f2f2f2f 之上再叠底色）。
+     * 统一成和键盘一致的 Monet 半透明底。
+     */
+    private fun hookEmojiSegmentedBar(module: XposedModule, loader: ClassLoader) {
+        val clazz = try { loader.loadClass("com.bytedance.android.input.keyboard.component.SegmentedBar") } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "SegmentedBar class missing: $t")
+            return
+        }
+        // 初始化完成点：setItems(List) —— 每次绑定分类列表都会走到
+        val method = clazz.declaredMethods.firstOrNull {
+            it.name == "setItems" && it.parameterTypes.size == 1 &&
+                List::class.java.isAssignableFrom(it.parameterTypes[0])
+        } ?: run {
+            module.log(Log.WARN, TAG, "SegmentedBar.setItems not found")
+            return
+        }
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                val bar = chain.thisObject as View
+                Handler(Looper.getMainLooper()).post { applySegmentedBarSurface(bar, module) }
+                result
+            }
+        module.log(Log.INFO, TAG, "SegmentedBar surface hook installed")
+    }
+
+    private fun applySegmentedBarSurface(bar: View, module: XposedModule) {
+        try {
+            val dark = bar.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+            val suffix = if (dark) "800" else "100"
+            val raw = monetColor(bar, "system_accent1_$suffix")
+            val base = if (raw == 0) {
+                if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
+            } else raw
+            val bg = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = bar.resources.displayMetrics.density * 20f
+                setColor(withAlpha(base, 0x66))
+            }
+            bar.background = bg
+            module.log(Log.INFO, TAG, "segmented bar surface dark=$dark")
         } catch (t: Throwable) {
-            module.log(Log.WARN, TAG, "toolbox isolate failed: $t")
+            module.log(Log.WARN, TAG, "segmented bar surface failed: $t")
         }
     }
 
-    /** 反射扫 InputViewRoot 的 ViewGroup 字段，找直接包含 ToolboxKeyboardView 的那个容器。 */
-    private fun findToolboxHost(root: Any): Pair<ViewGroup, View>? {
+    /**
+     * 表情面板整体底色。
+     *
+     * emoji_layout 的根 ConstraintLayout 在 XML 里写死 `background=@color/navigation_bar_normal`
+     * （night = #ff222222，完全不透明），inflate 走 setBackgroundResource 不经过 Resources.getColor，
+     * 所以 globalDarkGray 那套替换抓不到它 —— 结果就是面板底下那一条是死灰色。
+     * 这里把它清成透明，让 keyboard_whole 的 0x66 Monet 底 + 模糊透上来。
+     */
+    private fun applyEmojiSurface(emoji: View, module: XposedModule) {
+        try {
+            if (emoji is ViewGroup) {
+                for (i in 0 until emoji.childCount) {
+                    val child = emoji.getChildAt(i)
+                    if (child.background != null) child.background = ColorDrawable(0x00000000)
+                }
+            }
+            emoji.background = ColorDrawable(0x00000000)
+            val barId = emoji.resources.getIdentifier("segmented_bar", "id", emoji.context.packageName)
+            if (barId != 0) emoji.findViewById<View>(barId)?.let { applySegmentedBarSurface(it, module) }
+            module.log(Log.INFO, TAG, "emoji surface cleared")
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "emoji surface failed: $t")
+        }
+    }
+
+    private fun isolateKeyboardForToolbox(root: Any, show: Boolean, module: XposedModule) {
+        isolateOverlay(root, HookPoints.TOOLBOX, show, module, "toolbox")
+    }
+
+    /**
+     * 表情面板：和工具页同一套隔离逻辑。
+     *
+     * EmojiLayout 也是加进 mKeyboardMainContainerArea 的兄弟节点，
+     * 半透明时底下键盘和顶部工具栏都会透上来 —— 显示期间把这些兄弟 alpha 置 0，
+     * 只留表情面板本身，露出键盘那层 0x66 Monet 底 + 模糊。
+     */
+    private fun isolateKeyboardForEmoji(root: Any, show: Boolean, module: XposedModule) {
+        isolateOverlay(root, HookPoints.EMOJI_LAYOUT, show, module, "emoji")
+    }
+
+    private fun isolateOverlay(
+        root: Any,
+        targetClass: String,
+        show: Boolean,
+        module: XposedModule,
+        tag: String,
+    ) {
+        try {
+            val host = findOverlayHost(root, targetClass) ?: run {
+                module.log(Log.WARN, TAG, "$tag host not found")
+                return
+            }
+            val (container, target) = host
+            var count = 0
+            for (i in 0 until container.childCount) {
+                val child = container.getChildAt(i)
+                if (child === target) continue
+                hideOrRestoreAlpha(child, show)
+                count++
+            }
+            // 顶部工具栏在另一个容器里，单独处理
+            val bar = findViewByName(root as? View, "native_candidate_bar")
+            if (bar != null && bar !== target) {
+                hideOrRestoreAlpha(bar, show)
+                count++
+            }
+            if (show && targetClass == HookPoints.TOOLBOX) applyToolboxSurface(target, module)
+            if (show && targetClass == HookPoints.EMOJI_LAYOUT) applyEmojiSurface(target, module)
+            module.log(
+                Log.INFO, TAG,
+                "$tag isolate show=$show container=${container.childCount} touched=$count hidden=${hiddenSiblingAlpha.size}"
+            )
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "$tag isolate failed: $t")
+        }
+    }
+
+    private fun hideOrRestoreAlpha(view: View, show: Boolean) {
+        if (show) {
+            if (view.alpha != 0f) {
+                hiddenSiblingAlpha[view] = view.alpha
+                view.alpha = 0f
+            }
+        } else {
+            hiddenSiblingAlpha.remove(view)?.let { view.alpha = it }
+        }
+    }
+
+    private fun findViewByName(root: View?, name: String): View? {
+        val anchor = root ?: return null
+        val id = anchor.resources.getIdentifier(name, "id", anchor.context.packageName)
+        if (id == 0) return null
+        return anchor.rootView.findViewById(id)
+    }
+
+    /** 反射扫 InputViewRoot 的 ViewGroup 字段，找直接包含 [targetClass] 实例的那个容器。 */
+    private fun findOverlayHost(root: Any, targetClass: String): Pair<ViewGroup, View>? {
         for (f in root.javaClass.declaredFields) {
             if (!ViewGroup::class.java.isAssignableFrom(f.type)) continue
             f.isAccessible = true
             val group = try { f.get(root) as? ViewGroup } catch (_: Throwable) { null } ?: continue
             for (i in 0 until group.childCount) {
                 val child = group.getChildAt(i)
-                if (child.javaClass.name == HookPoints.TOOLBOX) return group to child
+                if (child.javaClass.name == targetClass) return group to child
             }
         }
         return null

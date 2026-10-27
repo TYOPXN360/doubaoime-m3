@@ -22,6 +22,7 @@ internal object HookPoints {
     const val TOOLBOX = "com.bytedance.common_biz.tool_box.ToolboxKeyboardView"
     const val TOOLBOX_ITEM = "com.bytedance.common_biz.tool_box.ToolboxItemView"
     const val OPTION_ITEM = "com.bytedance.android.input.OptionItemView"
+    const val EMOJI_LAYOUT = "com.bytedance.android.input.keyboard.emoji.EmojiLayout"
 
     /**
      * 候选词选中态。1.5.3 实测唯一命中：`b(I)V`
@@ -82,6 +83,26 @@ internal object HookPoints {
         .returnType("void")
         .addInvoke("Landroid/view/ViewGroup;->addView(Landroid/view/View;Landroid/view/ViewGroup\$LayoutParams;)V")
         .addInvoke("Lcom/bytedance/common_biz/tool_box/ToolboxKeyboardView;->setStatusGuide(Lcom/bytedance/common_biz/tool_box/h;)V")
+
+    /**
+     * 表情面板显示/隐藏入口（InputViewRoot 里 `w0(Z,String,String)V`）。
+     *
+     * 结构特征：boolean + String + String → void。
+     * 该类里同签名的只有这一个（另一个 String+boolean 的是工具箱入口）。
+     */
+    fun emojiToggle(): MethodMatcher = MethodMatcher.create()
+        .paramTypes("boolean", "java.lang.String", "java.lang.String")
+        .returnType("void")
+
+    /**
+     * 表情面板初始化（EmojiLayout.e(Context)V）。
+     *
+     * 结构特征：单参 Context、返回 void；类内唯一。
+     * 面板 inflate 完在这里做背景统一（根布局 / 分类 tab 栏）。
+     */
+    fun emojiInit(): MethodMatcher = MethodMatcher.create()
+        .paramTypes("android.content.Context")
+        .returnType("void")
 
     /**
      * 工具箱视图刷新。1.5.3：`q(Lcom/bytedance/common_biz/tool_box/i;)V`
