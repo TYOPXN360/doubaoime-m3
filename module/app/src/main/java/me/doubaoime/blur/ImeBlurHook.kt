@@ -561,8 +561,10 @@ internal object ImeBlurHook {
     }
 
     private fun hookToolboxKeyboardView(module: XposedModule, loader: ClassLoader) {
-        val toolbox = loader.loadClass("com.bytedance.common_biz.tool_box.ToolboxKeyboardView")
-        val method = toolbox.getDeclaredMethod("q").apply { isAccessible = true }
+        val method = HookFinder.method(loader, HookPoints.TOOLBOX, HookPoints.toolboxRefresh()) ?: run {
+            module.log(Log.WARN, TAG, "ToolboxKeyboardView refresh not found")
+            return
+        }
         module.hook(method)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
@@ -570,7 +572,7 @@ internal object ImeBlurHook {
                 applyToolboxSurface(chain.thisObject as View, module)
                 result
             }
-        val attached = toolbox.getDeclaredMethod("onAttachedToWindow").apply { isAccessible = true }
+        val attached = View::class.java.getDeclaredMethod("onAttachedToWindow")
         module.hook(attached)
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
