@@ -208,6 +208,7 @@ internal object ImeBlurHook {
      */
     private fun hookOverlayVisibility(module: XposedModule, loader: ClassLoader) {
         val lookupCls = loader.loadClass(HookPoints.HANDWRITING_LOOKUP)
+        val moreCls = loader.loadClass(HookPoints.MORE_CANDIDATE)
         val method = View::class.java.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType).apply { isAccessible = true }
         module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
             val self = chain.thisObject
@@ -218,6 +219,10 @@ internal object ImeBlurHook {
                     val show = v.visibility == View.VISIBLE
                     isolateSiblings(v, show, module, "lookup", keep = setOf("native_candidate_bar"))
                     if (show) clearLookupSurface(v, module)
+                } else if (moreCls.isInstance(v)) {
+                    val show = v.visibility == View.VISIBLE
+                    isolateSiblings(v, show, module, "moreCandidate", keep = setOf("native_candidate_bar"))
+                    if (show) clearMoreCandidateSurface(v, module)
                 } else if (v === clipContainer) {
                     syncClipboardToolbar(module)
                 }
@@ -265,6 +270,31 @@ internal object ImeBlurHook {
             setShape(GradientDrawable.RECTANGLE)
             cornerRadius = view.resources.displayMetrics.density * 8f
             setColor(withAlpha(base, if (view.isPressed) 0x99 else 0x66))
+        }
+    }
+
+    /**
+     * 展开候选字界面（MoreCandidateView）的底色是 more_candidate_root 上的 GradientDrawable，
+     * 不是 ColorDrawable，所以全局 #222222 替换抓不到它 —— 结果就是实心深黑。
+     * 这里直接清成透明，露出底板的 0x66 Monet + 模糊。
+     */
+    private fun clearMoreCandidateSurface(root: View, module: XposedModule) {
+        try {
+            var n = 0
+            listOf("more_candidate_root", "more_candidate_tab_container", "more_candidate_tab_area").forEach { name ->
+                val id = root.resources.getIdentifier(name, "id", root.context.packageName)
+                if (id != 0) {
+                    root.findViewById<View>(id)?.let { v ->
+                        if (v.background != null) {
+                            v.background = ColorDrawable(0x00000000)
+                            n++
+                        }
+                    }
+                }
+            }
+            module.log(Log.INFO, TAG, "moreCandidate surface cleared n=$n")
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "moreCandidate surface failed: $t")
         }
     }
 
