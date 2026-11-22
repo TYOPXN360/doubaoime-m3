@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 TYOPXN360
+
 package me.doubaoime.blur
 
 import android.app.Dialog

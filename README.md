@@ -36,3 +36,7 @@ LibXposed API 102 参考：
 - API 文档索引：<https://libxposed.github.io/api/>
 - Service 文档索引：<https://libxposed.github.io/service/>
 - API 源码：<https://github.com/libxposed/api>
+
+## 许可证
+
+GNU General Public License v3.0（GPL-3.0），全文见 [LICENSE](LICENSE)。
