@@ -26,12 +26,6 @@ cd module
 ./gradlew :app:assembleRelease
 ```
 
-构建前可核对 hook 锚点是否还在（DexSQL，只用于分析期）：
-
-```bash
-DEXSQL=/path/to/dexsql tools/check-hook-anchors.sh source/豆包输入法_1.5.6.apk
-```
-
 模块元数据：
 
 - `app/src/main/resources/META-INF/xposed/java_init.list`
@@ -42,7 +36,3 @@ LibXposed API 102 参考：
 - API 文档索引：<https://libxposed.github.io/api/>
 - Service 文档索引：<https://libxposed.github.io/service/>
 - API 源码：<https://github.com/libxposed/api>
-
-## 分析工具
-
-`tools/` 内为 JADX CLI 1.5.6、apktool 3.0.3 与 Temurin JDK 17 的固定版本脚本，校验和见 `tools/SHA256SUMS`。

@@ -1,12 +1,6 @@
-tools/*
-!tools/SHA256SUMS
-!tools/check-hook-anchors.sh
-!tools/hook-anchors.sql
-analysis/*/jadx/
-analysis/*/apktool/
-analysis/*.apk
-analysis/gboard/
-analysis/mcu-src/
+# 仅上传模块源码：分析与工具目录只保留在本地
+tools/
+analysis/
 module/.gradle/
 module/.gradle-home/
 module/build/
