@@ -9,8 +9,8 @@ android {
 
     defaultConfig {
         applicationId = "me.doubaoime.blur"
-        minSdk = 26
-        targetSdk = 35
+        minSdk = 31
+        targetSdk = 37
         versionCode = 2
         versionName = "1.1.0"
     }
