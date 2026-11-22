@@ -1,88 +1,47 @@
-# 豆包输入法差异与 LibXposed 模块
+# 豆包输入法 Monet 模糊模块
 
-## 当前已确认差异
+LibXposed 模块，目标包 `com.bytedance.android.doubaoime`（适配豆包输入法 **1.5.6**）。
+把键盘做成 Gboard 风格：系统 Monet 动态取色 + 背景模糊。
 
-样本：
+## 功能
 
-- 原版：`source/豆包输入法_1.4.2.apk`
-- 魔改版：`source/豆包魔改版.apk`
+- 键盘、候选栏、工具栏统一 Monet 动态取色，键盘背景带实时模糊
+- 按键半透明，按压/长按气泡跟随 Monet 色板
+- 手写找字页、候选展开页、超级联想输入框接入 Monet
+- 剪贴板、常用语卡片与分词胶囊统一为圆角半透明 Monet
+- 滑动工具栏、翻译、表情页、定制工具栏页与键盘视觉一致，不叠加、不串层
+- Android 12 以下只保留取色，模糊保护性跳过
 
-SHA-256 记录在 `analysis/diff/sample-sha256.txt`。
+## 修复记录（1.5.6）
 
-魔改版相对原版新增了 `classes4.dex` 和 `lib/arm64-v8a/libdbi.so`。通过 JADX CLI、apktool 和文本检索确认，模糊功能主要位于新增的 `swipe` 包：
+- 工具栏 / 翻译页偶发**双层 Monet**（颜色明显更深）
+- 先点表情再点翻译后，双层 Monet 一直残留
+- **定制工具栏**页面与底下键盘重叠，并且有双层 Monet
+- 复制文字后，剪贴板提示盖住工具栏
+- 剪贴板 / 常用语条目卡片仍是灰色不透明底
+- 超级联想输入框是灰色不透明底
+- 找字页面、候选展开页的删除键是灰色不透明底
+- “请先输入内容再整理”提示胶囊是灰色不透明底
+- 第一次弹出键盘卡顿（日志与重复资源查询）
+- 删除 1.5.6 已不存在的旧版本 hook
 
-- `swipe.BlurEffectManager`：Android 12+ 通过反射创建 `BackgroundBlurDrawable`，设置模糊半径和圆角，并可叠加渐变、描边、动态噪点。
-- `swipe.SwipeManager`：从 `swipe_preferences` 读取 `blur_enabled`、`blur_portrait_radius`、`blur_landscape_radius`、`blur_corner_radius` 等配置。
-- 魔改版在 `ImeService`、候选区、键盘视图等调用 `BlurEffectManager.applyBlurEffect()`；原版不存在这些 `swipe` 入口调用。
-- 魔改版新增 `swipe.SwipeSettingsActivity`，Manifest 中新增 `swipe.SwipeSettingsActivity`。
+## 安装
 
-这一区分了功能新增与普通依赖/资源重排差异。`libdbi.so` 已记录为新增 native 文件，但当前模糊入口已由 Java/smali 证据闭合，不把 native 文件误认作模糊实现。
-
-## 模块
-
-`module/` 是独立的 LibXposed API 102 Android 模块，目标包仅为 `com.bytedance.android.doubaoime`。实现位于 `ImeBlurHook.kt`：
-
-- hook `ImeService.onStartInputView(EditorInfo, boolean)`，并在 `onCreateInputView()` 作为兜底；
-- 对 `ImeService.getWindow()` 返回的键盘根视图设置 Android 12+ `RenderEffect.createBlurEffect()`；
-- 清除输入法 DecorView 的背景模糊，避免模糊键盘后面的屏幕；
-- 低于 Android 12 或厂商 API 缺失时保护性跳过，不影响原版输入法启动。
-
-当前版本优先完成模糊效果；渐变、Monet 取色、动态噪点、描边和其它魔改功能需在设备上确认原版窗口树与系统实现后继续拆分，避免靠猜测 hook 私有类。
-
-### 1.5.6 更新（2026-11-22）
-
-样本 `source/豆包输入法_1.5.6.apk`（versionCode `100506012`，SHA-256 见
-`analysis/diff/hook-anchors-1.5.6.md`）已用 DexSQL 逐条复核：
-
-- 15 个仍在使用的 hook 锚点全部命中，结构化 matcher 不需要硬编码混淆方法名。
-- 删除 1.5.3 遗留、1.5.6 已不存在的 `InputViewRoot.r2` / `ImeAnimatedStatusView.c` /
-  `AsrWaveView.g` 三条死 hook。
-- 移除过宽的 `toolboxRefresh` matcher：它在 1.5.6 会命中 24 个单参 void 方法，
-  `firstOrNull` 可能挂到 setter 上；该 hook 与 `hookOverlayVisibility` /
-  `hookToolboxToggle` 的 `applyToolboxSurface()` 重复，已删除。
-- 修复首次弹键盘卡顿：删除 `CandidateIdleView` 的递归 dump，热路径日志统一走
-  `DEBUG=false` 的 `dlog {}`，并按 id / 名字缓存资源查询；首次模糊的延迟从 4 次减为 3 次。
-- 修复工具栏偶发“双层 Monet”：`applyToolbarPageSurface()` 不再给工具栏页铺 0x99，
-  改为透明；`keyboard_whole` 内部子容器的 `#222222` 也改为透明，避免在 0x66 底板上再叠一层。
-- `HookFinder` 增加 DexKit 初始化/单次查找耗时日志，便于确认剩余卡顿是否来自
-  180MB APK 的首次索引。
-- 修复剪贴板 / 常用语里条目卡片仍是灰色：这些底色写死在 shape drawable 里
-  （`bg_clipboard_history_item` 与 `bg_common_phrase_normal` 夜间都是 `#ff3d3d3d`，
-  分词胶囊是 `#0f000000`），inflate 既不经过 `Resources.getColor` 也不经过
-  `View.setBackgroundResource`，之前的颜色钩子接不到。现在面板可见 / 列表滚动时按
-  视图 id（`clipboard_history_list_item_bg`、`common_phrase_list_item_bg`、
-  `clipboard_history_word_segmentation_item_text`）扫一遍，换成同圆角的半透明
-  Monet 强调色；饱和度高的选中态背景保持原样，选中反馈不丢。
-- 修复双层 Monet 的根因：删掉了全局的 `Resources.getColor(#222222) → 0x66` 重映射。
-  那个重映射会把候选栏 `native_candidate_bar` 也染成半透明强调色，铺在
-  `keyboard_whole` 的 0x66 底板上就是第二层。现在只在 `setBackground` /
-  `setBackgroundColor` 里按 `isOverMonetBoard(view)` 判断：底板内部一律透明，
-  其余才用 0x66。另外补了 attach 后 0/120/400ms 的复查，清掉“inflate 时还判断
-  不出在底板里”的迟到色块 —— 表情 → 返回 → 翻译那种先后顺序不再残留双层。
-- 复制文字后剪贴板提示会盖住工具栏：`toolbar_clipboard_close` 可见期间把
-  `native_candidate_bar` 的 alpha 置 0，提示消失后恢复，两者不再叠在一起。
-- 超级联想的输入框、找字界面的删除键、候选展开页的删除键原来是不透明灰底，
-  现在分别按 `SuperAssociationEditText` / `more_candidate_delete` 换成圆角半透明 Monet。
-- “定制工具栏”页（PopupWindow）与键盘重叠 + 双层 Monet：原生浮窗铺的是不透明
-  `#222222`，被换成 0x66 后键盘键位透出来、还和底板叠成两层。现在浮窗弹出时把
-  面板本身改透明、临时隐藏 `KeyboardView`（应用进入定制态会重置 alpha，所以用
-  120ms 看门狗持续压住），只留键盘那一层 0x66 底板；`dismiss()` 时停止并恢复。
-
-DexSQL 目前只有桌面 CLI/MCP 和 WASM，没有可在 Android 进程内加载的运行库，
-因此没有把 dexsql 塞进 APK；运行期仍由 DexKit 按结构特征解析。dexsql 用于
-构建/分析期的锚点核对：
-
-```bash
-DEXSQL=/path/to/dexsql tools/check-hook-anchors.sh source/豆包输入法_1.5.6.apk
-```
-
-查询定义在 `tools/hook-anchors.sql`，失配会输出 `<MISSING>` 并以非 0 退出。
+- 版本：`1.1.0`（versionCode 2），Release 页提供已签名 APK
+- 最低系统：Android 8.0；模糊效果需 Android 12+
+- 需要 LSPosed（LibXposed API 102），作用域只勾选豆包输入法
 
 ## 构建
 
 ```bash
 cd module
-./gradlew :app:assembleDebug
+./gradlew :app:assembleRelease
+```
+
+构建前可核对 hook 锚点是否还在（DexSQL，只用于分析期）：
+
+```bash
+DEXSQL=/path/to/dexsql tools/check-hook-anchors.sh source/豆包输入法_1.5.6.apk
 ```
 
 模块元数据：
@@ -96,6 +55,6 @@ LibXposed API 102 参考：
 - Service 文档索引：<https://libxposed.github.io/service/>
 - API 源码：<https://github.com/libxposed/api>
 
-## 复现分析
+## 分析工具
 
-工具固定在 `tools/`，使用 JADX CLI 1.5.6、apktool 3.0.3 和 Temurin JDK 17；工具校验和见 `tools/SHA256SUMS`。解包产物按样本分类位于 `analysis/original/`、`analysis/modded/`，差异摘要位于 `analysis/diff/`。
+`tools/` 内为 JADX CLI 1.5.6、apktool 3.0.3 与 Temurin JDK 17 的固定版本脚本，校验和见 `tools/SHA256SUMS`。
