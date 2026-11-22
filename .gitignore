@@ -1,5 +1,7 @@
-tools/
+tools/*
 !tools/SHA256SUMS
+!tools/check-hook-anchors.sh
+!tools/hook-anchors.sql
 analysis/*/jadx/
 analysis/*/apktool/
 analysis/*.apk
@@ -12,6 +14,8 @@ module/**/build/
 module/local.properties
 module/.build-tmp/
 module/.kotlin/
+.build-tmp/
+.tmp-ref/
 gboard_probe/
 source/*.apk
 *.keystore

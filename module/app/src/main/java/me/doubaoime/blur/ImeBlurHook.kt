@@ -14,7 +14,6 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
-import java.io.File
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
@@ -37,6 +36,87 @@ import java.lang.reflect.Method
 internal object ImeBlurHook {
     private const val TAG = "DoubaoImeBlur"
     private const val MONET_BG_ID = "keyboard_whole"
+
+    /**
+     * 调试开关。默认关闭：第一版把 View.setBackground / Resources.getColor 这类
+     * 每次 inflate、每次按键都会走的热路径全量打日志，第一次弹键盘会因此明显卡顿。
+     * 需要排查时再打开，开启后也只保留关键分支日志。
+     */
+    private const val DEBUG = false
+
+    private inline fun dlog(module: XposedModule, msg: () -> String) {
+        if (DEBUG) module.log(Log.DEBUG, TAG, msg())
+    }
+
+    /** getResourceEntryName 是 JNI 调用，热路径上按 id 缓存。 */
+    private val entryNameCache = java.util.concurrent.ConcurrentHashMap<Int, String>()
+
+    private fun entryName(view: View): String = try {
+        val id = view.id
+        if (id == View.NO_ID || id == 0) "" else entryNameCache.getOrPut(id) {
+            view.resources.getResourceEntryName(id)
+        }
+    } catch (_: Throwable) {
+        ""
+    }
+
+    /** 资源 id 同样按名字缓存，避免每次弹键盘都走 AssetManager 查表。 */
+    private val resIdCache = java.util.concurrent.ConcurrentHashMap<String, Int>()
+
+    private fun resId(resources: Resources, name: String): Int =
+        resIdCache[name] ?: resources.getIdentifier(name, "id", "com.bytedance.android.doubaoime")
+            .also { if (it != 0) resIdCache[name] = it }
+
+    /**
+     * 是否位于 keyboard_whole（0x66 Monet 底板）内部。
+     * 底板已经铺过一层半透明强调色，子容器再吃一次 #222222→0x66 就会叠成双层，
+     * 表现为工具栏/工具页某一块颜色明显更深。这种子容器应当保持透明。
+     */
+    private var keyboardWholeRef: java.lang.ref.WeakReference<View>? = null
+
+    private fun keyboardWhole(view: View): View? {
+        val cached = keyboardWholeRef?.get()
+        if (cached != null && cached.rootView === view.rootView) return cached
+        val id = resId(view.resources, "keyboard_whole")
+        if (id == 0) return null
+        val whole = try { view.rootView.findViewById<View>(id) } catch (_: Throwable) { null }
+        if (whole != null) keyboardWholeRef = java.lang.ref.WeakReference(whole)
+        return whole
+    }
+
+    /**
+     * 是否压在 keyboard_whole 的 0x66 底板之上。
+     *
+     * 光看 `isInsideKeyboardWhole()` 不够：工具栏那一行（ImeToolBarContainer）挂在
+     * input_view_root 上、和 keyboard_whole 是兄弟节点，屏幕位置却完全压在底板上。
+     * 它内部子容器再吃一次 `#222222` → 0x66 就是用户看到的「工具栏被附身双层 Monet」。
+     * 所以只要 rootView 里存在 keyboard_whole（即同一个输入法窗口），就当作在底板上方。
+     */
+    private fun isOverMonetBoard(view: View): Boolean {
+        if (isInsideKeyboardWhole(view)) return true
+        val wholeId = resId(view.resources, "keyboard_whole")
+        if (wholeId == 0) return false
+        return try { view.rootView.findViewById<View>(wholeId) != null } catch (_: Throwable) { false }
+    }
+
+    private fun isInsideKeyboardWhole(view: View): Boolean {
+        val whole = keyboardWhole(view) ?: return false
+        var p: View? = view
+        while (p != null) {
+            if (p === whole) return true
+            p = p.parent as? View
+        }
+        return false
+    }
+
+    /**
+     * 候选栏保护区。
+     *
+     * 应用不是"清空候选"，而是用不透明的空闲视图（CandidateIdleView / lookup_tool_bar_placeholder）
+     * 盖住候选。我们把这一片做成透明后，遮罩的信息量就没了，旧候选一直留在屏幕上。
+     * 所以这些 view 一律不染色、不透明化，保持原样。
+     */
+    private val CANDIDATE_PROTECTED_IDS = setOf("native_candidate_bar", "lookup_tool_bar_placeholder")
 
     /**
      * 底板自己已经是 0x66 强调色，这些子面板再叠一层就成了双层强调色（明显变深）。
@@ -85,7 +165,6 @@ internal object ImeBlurHook {
             "fillRect" to { hookKeyboardViewFillRect(module, loader) },
             "shadow" to { hookKeyboardViewShadow(module, loader) },
             "bubble" to { hookKeyboardViewTouchBubble(module, loader) },
-            "toolboxView" to { hookToolboxKeyboardView(module, loader) },
             "toolboxItem" to { hookToolboxItemView(module, loader) },
             "candidate" to { hookCandidateItemSelected(module, loader) },
             "optionItem" to { hookOptionItemToolbarRefresh(module, loader) },
@@ -94,6 +173,7 @@ internal object ImeBlurHook {
             "emojiToggle" to { hookEmojiToggle(module, loader) },
             "emojiBar" to { hookEmojiSegmentedBar(module, loader) },
             "clipboardDismiss" to { hookClipboardDismiss(module, loader) },
+            "superAssociation" to { hookSuperAssociationEditText(module, loader) },
             "overlayVisibility" to { hookOverlayVisibility(module, loader) },
         ).forEach { (name, block) ->
             try { block() } catch (t: Throwable) {
@@ -105,6 +185,21 @@ internal object ImeBlurHook {
         hookToolbarBackgroundProbe(module)
         hookToolbarBackgroundColorOverride(module)
         hookToolbarBackgroundResourceOverride(module)
+        try {
+            hookToastSurface(module)
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "toast surface hook skipped: $t")
+        }
+        try {
+            hookToastBackgroundView(module, loader)
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "toast background hook skipped: $t")
+        }
+        try {
+            hookCustomizeToolbarPopup(module)
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "customize popup hook skipped: $t")
+        }
     }
 
     private fun hookToolbarBackgroundProbe(module: XposedModule) {
@@ -119,27 +214,121 @@ internal object ImeBlurHook {
                 }
                 val drawable = chain.getArg(0) as? Drawable
                 val color = (drawable as? ColorDrawable)?.color
-                val idName = try {
-                    if (view.id == View.NO_ID) "-" else view.resources.getResourceEntryName(view.id)
-                } catch (_: Throwable) { "?" }
-                val cls = view.javaClass.name
-                // 记录所有 ColorDrawable 背景（不限 ID），找出按键背景设置路径
-                if (color != null && idName !in setOf("-", "")) {
-                    module.log(Log.INFO, TAG, "setBackground view=$cls id=$idName color=#${Integer.toHexString(color)}")
+                val idName = entryName(view)
+                if (DEBUG && color != null && idName.isNotEmpty()) {
+                    // 只有显式打开 DEBUG 才逐 view 打日志：inflate 时这会刷几百行，
+                    // 第一次弹键盘的卡顿主要就是它。
+                    dlog(module) { "setBackground view=${view.javaClass.name} id=$idName color=#${Integer.toHexString(color)}" }
                 }
                 if (idName == "native_candidate_bar") watchClipboardToolbar(view, module)
                 if (idName in TRANSPARENT_BG_IDS) {
-                    module.log(Log.INFO, TAG, "kept bg transparent over Monet body id=$idName")
+                    dlog(module) { "kept bg transparent over Monet body id=$idName" }
                     chain.proceed(arrayOf<Any>(ColorDrawable(0x00000000)))
                 } else if (color == 0xff222222.toInt()) {
-                    val replacement = globalMonetSurface(view.resources)
-                    module.log(Log.INFO, TAG, "setBackground #222222 -> #${Integer.toHexString(replacement)} view=$cls id=$idName")
+                    // keyboard_whole 内部已经有 0x66 底板，子容器再叠一层就是双层 Monet。
+                    val replacement = replacementForLegacy222(view)
+                    dlog(module) { "setBackground #222222 -> #${Integer.toHexString(replacement)} id=$idName" }
+                    if (replacement != 0) clearIfInsideBoardOnAttach(view, module)
                     chain.proceed(arrayOf<Any>(ColorDrawable(replacement)))
                 } else {
                     chain.proceed()
                 }
             }
         module.log(Log.INFO, TAG, "toolbar background probe installed")
+    }
+
+    /**
+     * inflate 期间命中的 `#222222` 往往发生在视图还没挂到窗口树上，
+     * 这时 `isInsideKeyboardWhole()` 只能返回 false，被当成“独立浮层”铺了 0x66。
+     * 一旦它 attach 到 keyboard_whole 内部（工具栏页、翻译页、表情页都是这种），
+     * 这层 0x66 就变成第二层 Monet，而之后再也没人清 —— 表现就是“先点表情再点翻译，
+     * 双层 Monet 一直留着，只有重启输入法才掉”。
+     * 所以这里补一个 attach 回调，挂上去之后确认在底板内部就把它清透明。
+     */
+    private fun clearIfInsideBoardOnAttach(view: View, module: XposedModule) {
+        fun settle(v: View) {
+            if (v.background !is ColorDrawable) return
+            if (!isOverMonetBoard(v)) return
+            v.background = ColorDrawable(0x00000000)
+            dlog(module) { "cleared late Monet layer id=${entryName(v)}" }
+        }
+        if (view.isAttachedToWindow) {
+            view.post { settle(view) }
+            return
+        }
+        view.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                v.removeOnAttachStateChangeListener(this)
+                // 挂上去的当帧 rootView 可能还没建好底板，补几拍
+                for (delay in longArrayOf(0L, 120L, 400L)) {
+                    v.postDelayed({ settle(v) }, delay)
+                }
+            }
+
+            override fun onViewDetachedFromWindow(v: View) {}
+        })
+    }
+
+    private val candidateBarWatched = java.util.Collections.newSetFromMap(java.util.WeakHashMap<View, Boolean>())
+
+    /**
+     * 候选/工具栏那一行（native_candidate_bar）必须保持透明。
+     *
+     * 它原生底色是 `#ff222222`，压在 keyboard_whole 的 0x66 底板上就是「黑灰色 / 双层 Monet」。
+     * 应用不是每次都用 setBackground 重设，有时直接改现有 ColorDrawable 的颜色或重新 inflate，
+     * 视图级的几个 hook 接不全。所以这里在浮层切换和这一行重新布局时兜底扫一遍，
+     * 只要底色不透明就清成透明，让底板那层透上来。
+     */
+    private fun clearCandidateBarSurface(anchor: View, module: XposedModule) {
+        val id = resId(anchor.resources, "native_candidate_bar")
+        if (id == 0) return
+        val bar = try { anchor.rootView.findViewById<View>(id) } catch (_: Throwable) { null } ?: return
+        normalizeCandidateBar(bar)
+        if (candidateBarWatched.add(bar)) {
+            bar.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ -> normalizeCandidateBar(v) }
+        }
+    }
+
+    private fun normalizeCandidateBar(bar: View) {
+        val bg = bar.background
+        val color = when (bg) {
+            null -> return
+            is ColorDrawable -> bg.color
+            is GradientDrawable -> bg.color?.defaultColor ?: return
+            else -> return
+        }
+        if (color == 0) return
+        bar.background = ColorDrawable(0x00000000)
+    }
+
+    /**
+     * 复制文字后弹出的剪贴板提示条本身是透明的（它的 navigation_bar_normal 被我们清成了透明），
+     * 而它和 native_candidate_bar 是同一个位置、同高度 —— 不管掉底下的候选/工具栏，
+     * 就会看到提示文字和工具栏图标叠在一起。提示可见期间把候选栏 alpha 归零，收起再恢复。
+     */
+    private val clipTipWatched = java.util.Collections.newSetFromMap(java.util.WeakHashMap<View, Boolean>())
+
+    private fun syncClipboardTip(anchor: View, module: XposedModule) {
+        val closeId = resId(anchor.resources, "toolbar_clipboard_close")
+        if (closeId == 0) return
+        val close = try { anchor.rootView.findViewById<View>(closeId) } catch (_: Throwable) { null } ?: return
+        val barId = resId(anchor.resources, "native_candidate_bar")
+        if (barId == 0) return
+        val bar = try { anchor.rootView.findViewById<View>(barId) } catch (_: Throwable) { null } ?: return
+
+        val showing = close.isShown
+        val target = if (showing) 0f else 1f
+        if (bar.alpha != target) {
+            bar.alpha = target
+            dlog(module) { "clipboard tip showing=$showing candidateBarAlpha=$target" }
+        }
+        if (clipTipWatched.add(close)) {
+            // 提示条是靠内部状态显隐的，布局变化时再对一次
+            close.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+                val t = if (close.isShown) 0f else 1f
+                if (bar.alpha != t) bar.alpha = t
+            }
+        }
     }
 
     /**
@@ -197,7 +386,7 @@ internal object ImeBlurHook {
         if (bar.alpha != target) {
             bar.alpha = target
             val cleared = if (showing) clearDoubleTint(container, module) else 0
-            module.log(Log.INFO, TAG, "clipboard toolbar showing=$showing candidateBarAlpha=$target clearedTint=$cleared")
+            dlog(module) { "clipboard toolbar showing=$showing candidateBarAlpha=$target clearedTint=$cleared" }
         }
     }
 
@@ -210,6 +399,11 @@ internal object ImeBlurHook {
         val lookupCls = loader.loadClass(HookPoints.HANDWRITING_LOOKUP)
         val boardCls = loader.loadClass(HookPoints.HANDWRITING_BOARD)
         val moreCls = loader.loadClass(HookPoints.MORE_CANDIDATE)
+        val toolbarContainerCls = try {
+            loader.loadClass("com.bytedance.android.input.keyboard.toolbar.container.ImeToolBarContainer")
+        } catch (_: Throwable) {
+            null
+        }
         val method = View::class.java.getDeclaredMethod("setVisibility", Int::class.javaPrimitiveType).apply { isAccessible = true }
         module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
             val self = chain.thisObject
@@ -232,13 +426,32 @@ internal object ImeBlurHook {
                 } else if (v.javaClass.simpleName == "ClipboardCommonPhraseContainer") {
                     val show = v.visibility == View.VISIBLE
                     isolateSiblings(v, show, module, "clipboardPanel")
+                    if (show) scheduleCards(v, module)
                 } else if (v === clipContainer) {
                     syncClipboardToolbar(module)
+                }
+                if (entryName(v) == "translate_view") {
+                    for (delay in longArrayOf(0L, 120L, 400L, 900L)) {
+                        v.postDelayed({ clearCandidateBarSurface(v, module) }, delay)
+                    }
+                }
+                val changedName = entryName(v)
+                if (changedName == "toolbar_clipboard_close" ||
+                    changedName == "toolbar_clipboard_content_container" ||
+                    changedName == "native_candidate_bar" ||
+                    v.javaClass.simpleName == "ImeToolBarContainer"
+                ) {
+                    syncClipboardTip(v, module)
                 }
             }
             result
         }
         module.log(Log.INFO, TAG, "overlay visibility hook installed")
+    }
+
+    private fun isCandidateProtected(v: View): Boolean {
+        if (v.javaClass.simpleName == "CandidateIdleView") return true
+        return entryName(v) in CANDIDATE_PROTECTED_IDS
     }
 
     private fun isolateSiblings(
@@ -252,11 +465,11 @@ internal object ImeBlurHook {
         for (i in 0 until container.childCount) {
             val c = container.getChildAt(i)
             if (c === target) continue
-            val name = try { if (c.id == View.NO_ID) "" else c.resources.getResourceEntryName(c.id) } catch (_: Throwable) { "" }
+            val name = entryName(c)
             // keep 里的（候选字栏）不但不能藏，还要强制还原
             hideOrRestoreAlpha(c, if (name in keep) false else show, tag)
         }
-        module.log(Log.INFO, TAG, "$tag isolate show=$show hidden=${hiddenByTag[tag]?.size ?: 0}")
+        dlog(module) { "$tag isolate show=$show hidden=${hiddenByTag[tag]?.size ?: 0}" }
     }
 
     private fun collectKeyComponents(v: View, out: MutableList<View>, depth: Int) {
@@ -293,6 +506,25 @@ internal object ImeBlurHook {
      * 不是 ColorDrawable，所以全局 #222222 替换抓不到它 —— 结果就是实心深黑。
      * 这里直接清成透明，露出底板的 0x66 Monet + 模糊。
      */
+    /** 键帽用的 Monet 状态选择器：默认 0x66，按下 0x99，圆角 8dp。 */
+    private fun monetKeySelector(view: View): Drawable {
+        val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val raw = monetColor(view, if (dark) "system_accent1_800" else "system_accent1_100")
+        val base = if (raw == 0) {
+            if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
+        } else raw
+        val radius = view.resources.displayMetrics.density * 8f
+        fun shape(alpha: Int) = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius
+            setColor(withAlpha(base, alpha))
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_pressed), shape(0x99))
+            addState(intArrayOf(), shape(0x66))
+        }
+    }
+
     private fun clearMoreCandidateSurface(root: View, module: XposedModule) {
         try {
             var n = 0
@@ -307,7 +539,16 @@ internal object ImeBlurHook {
                     }
                 }
             }
-            module.log(Log.INFO, TAG, "moreCandidate surface cleared n=$n")
+            // 右下角删除键是 ImageView + bg_more_candidate_delete 状态选择器
+            // （night 默认 #ff393939 / 按下 #ff5d5d5d），换成 Monet 强调色版本
+            val delId = resId(root.resources, "more_candidate_delete")
+            if (delId != 0) {
+                root.findViewById<View>(delId)?.let { del ->
+                    del.background = monetKeySelector(del)
+                    n++
+                }
+            }
+            dlog(module) { "moreCandidate surface cleared n=$n" }
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "moreCandidate surface failed: $t")
         }
@@ -325,9 +566,9 @@ internal object ImeBlurHook {
                 val keys = ArrayList<View>()
                 collectKeyComponents(root, keys, 0)
                 keys.forEach { tintLookupKey(it, module) }
-                module.log(Log.INFO, TAG, "handwriting keys tinted n=${keys.size}")
+                dlog(module) { "handwriting keys tinted n=${keys.size}" }
             }, 80)
-            module.log(Log.INFO, TAG, "handwriting surface cleared")
+            dlog(module) { "handwriting surface cleared" }
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "handwriting surface failed: $t")
         }
@@ -350,17 +591,290 @@ internal object ImeBlurHook {
     private fun restoreCandidateBar(from: View, module: XposedModule) {
         var p: View? = from
         while (p != null) {
-            val n = try { if (p.id == View.NO_ID) "" else p.resources.getResourceEntryName(p.id) } catch (_: Throwable) { "" }
+            val n = entryName(p)
             if (n == "keyboard_main_container_area") {
                 val bar = findViewByName(p, "native_candidate_bar")
                 if (bar != null && bar.alpha != 1f) {
                     bar.alpha = 1f
-                    module.log(Log.INFO, TAG, "candidate bar restored after clipboard dismiss")
+                    dlog(module) { "candidate bar restored after clipboard dismiss" }
                 }
                 return
             }
             p = p.parent as? View
         }
+    }
+
+    /**
+     * 剪贴板 / 常用语面板里每条记录的卡片底色。
+     *
+     * 这些底色是写死在 shape drawable 里的颜色，inflate 时既不走 Resources.getColor，
+     * 也不走 View.setBackgroundResource，所以前面所有颜色钩子都接不到，一直是原生灰：
+     *   clipboard_history_list_item_bg  -> bg_clipboard_history_item -> #ff3d3d3d (night)
+     *   common_phrase_list_item_bg      -> bg_common_phrase_normal   -> #ff3d3d3d (night)
+     *   clipboard_history_word_segmentation_item_text（分词胶囊）-> #0f000000
+     * 面板可见 / 列表滚动时按 id 扫一遍换成半透明 Monet 强调色，圆角沿用原 drawable。
+     * 选中态是饱和蓝（#334f84ff），饱和度高的背景一律不动，保住选中反馈。
+     */
+    private val CARD_BG_IDS = setOf(
+        "clipboard_history_list_item_bg",
+        "common_phrase_list_item_bg",
+        "clipboard_history_word_segmentation_item_text",
+    )
+
+    /** 卡片 -> 我们换上去的 drawable。应用自己重置底色（选中/取消选中）后能自动再覆盖一次。 */
+    private val monetizedCards = java.util.WeakHashMap<View, Drawable>()
+    private val cardScrollWatched = java.util.Collections.newSetFromMap(java.util.WeakHashMap<View, Boolean>())
+
+    private fun scheduleCards(root: View, module: XposedModule) {
+        val handler = Handler(Looper.getMainLooper())
+        // 面板是先 setVisibility 再 bind，列表项会晚一拍才出现
+        for (delay in longArrayOf(0L, 80L, 240L, 600L)) {
+            handler.postDelayed({
+                try {
+                    refreshCards(root)
+                } catch (t: Throwable) {
+                    module.log(Log.WARN, TAG, "clipboard cards refresh failed: $t")
+                }
+            }, delay)
+        }
+    }
+
+    private fun refreshCards(root: View) {
+        if (root.visibility != View.VISIBLE) return
+        if (cardScrollWatched.add(root)) {
+            // 滚动复用 item 时会重新 inflate 出灰色卡片，跟着滚动补一遍
+            root.viewTreeObserver.addOnScrollChangedListener {
+                if (root.visibility == View.VISIBLE) root.post { refreshCards(root) }
+            }
+        }
+        fun walk(v: View, depth: Int) {
+            if (depth > 20) return
+            if (entryName(v) in CARD_BG_IDS) monetizeCard(v)
+            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i), depth + 1)
+        }
+        walk(root, 0)
+    }
+
+    private fun monetizeCard(view: View): Boolean {
+        val applied = monetizedCards[view]
+        if (applied != null && view.background === applied) return false
+        val gd = view.background as? GradientDrawable ?: return false
+        val original = gd.color?.defaultColor ?: return false
+        val hsv = FloatArray(3)
+        Color.colorToHSV(original, hsv)
+        // 选中态是饱和蓝，别动
+        if (hsv[1] > 0.25f) return false
+
+        val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+        val accent = monetColor(view, if (dark) "system_accent1_800" else "system_accent1_100")
+        val base = if (accent == 0) {
+            if (dark) 0xFFFFFFFF.toInt() else 0xFF000000.toInt()
+        } else accent
+        // 不透明灰卡给厚一点，本来就半透明的分词胶囊保持更淡
+        val alpha = if (Color.alpha(original) >= 0x80) 0x4d else 0x2e
+        val radius = if (gd.cornerRadius > 0f) gd.cornerRadius else 10f * view.resources.displayMetrics.density
+
+        val replacement = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius
+            setColor(withAlpha(base, alpha))
+        }
+        view.background = replacement
+        monetizedCards[view] = replacement
+        return true
+    }
+
+    /**
+     * 超级联想的辅助指令输入框（SuperAssociationEditText）。
+     *
+     * 它的背景在 XML 里写死 `bg_super_association_container` → `super_association_container_bg`
+     * （night = #ff4a4a4a，完全不透明），inflate 不走 setBackgroundResource 也不走 getColor，
+     * 所以在模糊面板上就是一块死灰。这里在构造完成、挂到窗口后换成半透明 Monet 圆角底。
+     */
+    private fun hookSuperAssociationEditText(module: XposedModule, loader: ClassLoader) {
+        val cls = try {
+            loader.loadClass("com.bytedance.android.input.keyboard.superassociation.SuperAssociationEditText")
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "SuperAssociationEditText missing: $t")
+            return
+        }
+        cls.declaredConstructors.forEach { ctor ->
+            try {
+                ctor.isAccessible = true
+                module.hook(ctor)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept { chain ->
+                        val result = chain.proceed()
+                        val view = (chain.thisObject as? View) ?: (result as? View)
+                        if (view != null) view.post { applySuperAssociationSurface(view) }
+                        result
+                    }
+            } catch (t: Throwable) {
+                module.log(Log.WARN, TAG, "SuperAssociationEditText ctor hook skipped: $t")
+            }
+        }
+        module.log(Log.INFO, TAG, "super association edit surface hook installed")
+    }
+
+    private fun applySuperAssociationSurface(view: View) {
+        try {
+            val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+            val raw = monetColor(view, if (dark) "system_accent1_800" else "system_accent1_100")
+            val base = if (raw != 0) raw else if (dark) 0xff3a3a3a.toInt() else 0xffffffff.toInt()
+            view.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = 10f * view.resources.displayMetrics.density
+                setColor(withAlpha(base, 0x3d))
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * Toast 胶囊（比如“请先输入内容再整理”）用的是 layout_toast_window + bg_shape_toast，
+     * 底色 sixty_percent_black（#99000000），在模糊键盘上就是一块不透明灰。
+     * Toast 的 View 是 inflate 出来的，不经过 setBackground 那几个 hook，
+     * 所以挂在 Toast.setView 上，设置完再把这层中性黑灰换成半透明 Monet 圆角。
+     */
+    private fun hookToastSurface(module: XposedModule) {
+        val setView = android.widget.Toast::class.java.getDeclaredMethod("setView", View::class.java)
+        setView.isAccessible = true
+        module.hook(setView)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                try {
+                    monetizeToast(chain.getArg(0) as? View)
+                } catch (_: Throwable) {
+                }
+                result
+            }
+        module.log(Log.INFO, TAG, "toast surface hook installed")
+    }
+
+    private fun monetizeToast(root: View?) {
+        val anchor = root ?: return
+        fun walk(v: View, depth: Int) {
+            if (depth > 6) return
+            val bg = v.background
+            val color = when (bg) {
+                is ColorDrawable -> bg.color
+                is GradientDrawable -> bg.color?.defaultColor ?: -1
+                else -> -1
+            }
+            if (color != -1) {
+                val alpha = color ushr 24
+                val hsv = FloatArray(3)
+                Color.colorToHSV(color, hsv)
+                // 只处理不透明的中性深色/浅色底，保留有彩色（错误红、成功绿）的原样
+                if (alpha >= 0x80 && hsv[1] < 0.30f) {
+                    val radius = (bg as? GradientDrawable)?.cornerRadius?.takeIf { it > 0f }
+                        ?: (10f * v.resources.displayMetrics.density)
+                    val dark = v.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+                    val raw = monetColor(v, if (dark) "system_accent1_800" else "system_accent1_100")
+                    val base = if (raw != 0) raw else if (dark) 0xff303030.toInt() else 0xffffffff.toInt()
+                    v.background = GradientDrawable().apply {
+                        shape = GradientDrawable.RECTANGLE
+                        cornerRadius = radius
+                        setColor(withAlpha(base, 0xcc))
+                    }
+                }
+            }
+            if (v is ViewGroup) for (i in 0 until v.childCount) walk(v.getChildAt(i), depth + 1)
+        }
+        walk(anchor, 0)
+    }
+
+    /**
+     * 输入法的 toast 胶囊（“请先输入内容再整理”）不是 android.widget.Toast，
+     * 而是 OUI 的 ToastBackgroundView —— 它在 onDraw 里用 Paint 画圆角底，
+     * 颜色来自 setBgColor(colorRes, colorRes) 里读到的 #99000000。
+     * 背景不挂在 View 上，所以前面的 setBackground 钩子都碰不到，
+     * 这里直接改它的 Paint 颜色，换成半透明 Monet。
+     */
+    private fun hookToastBackgroundView(module: XposedModule, loader: ClassLoader) {
+        val cls = try { loader.loadClass("com.obric.oui.toast.ToastBackgroundView") } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "ToastBackgroundView missing: $t")
+            return
+        }
+        val method = cls.declaredMethods.firstOrNull {
+            it.name == "setBgColor" && it.parameterTypes.size == 2 &&
+                it.parameterTypes[0] == Int::class.javaPrimitiveType &&
+                it.parameterTypes[1] == Int::class.javaPrimitiveType
+        } ?: run {
+            module.log(Log.WARN, TAG, "ToastBackgroundView.setBgColor not found")
+            return
+        }
+        val paints = cls.declaredFields.filter { Paint::class.java.isAssignableFrom(it.type) }
+            .onEach { it.isAccessible = true }
+        method.isAccessible = true
+        module.hook(method)
+            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+            .intercept { chain ->
+                val result = chain.proceed()
+                try {
+                    val view = chain.thisObject as View
+                    val dark = view.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
+                    val raw = monetColor(view, if (dark) "system_accent1_800" else "system_accent1_100")
+                    val base = if (raw != 0) raw else if (dark) 0xff303030.toInt() else 0xffffffff.toInt()
+                    val color = withAlpha(base, 0xcc)
+                    for (f in paints) (f.get(view) as? Paint)?.color = color
+                    view.invalidate()
+                } catch (_: Throwable) {
+                }
+                result
+            }
+        module.log(Log.INFO, TAG, "toast background view hook installed")
+    }
+
+    /**
+     * “定制工具栏”是以 PopupWindow 盖在键盘上弹出的。
+     *
+     * 原生给这个浮窗铺的是不透明 #222222 面板；我们统一换成 0x66 Monet 之后：
+     * 1) 下面的键盘键位会透出来，看起来像两层内容重叠；
+     * 2) 浮窗 0x66 + 键盘底板 0x66 叠成双层 Monet（颜色明显更深）。
+     *
+     * 处理：浮窗弹出时把面板本身改透明，并临时隐藏键盘键位层（KeyboardView），
+     * 只留键盘那一层 0x66 底板（含模糊）透上来 —— 单层 Monet、没有键位、工具栏行还在。
+     * 应用进入定制态会重置 KeyboardView 的 alpha，所以用短周期看门狗持续压住；
+     * 浮窗 dismiss 时立刻停止并恢复。
+     */
+    private fun hookCustomizeToolbarPopup(module: XposedModule) {
+        val cls = android.widget.PopupWindow::class.java
+        for (nm in arrayOf("showAtLocation", "showAsDropDown")) {
+            cls.declaredMethods.filter { it.name == nm }.forEach { m ->
+                try {
+                    m.isAccessible = true
+                    module.hook(m)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept { chain ->
+                            val result = chain.proceed()
+                            try {
+                                val cv = (chain.thisObject as android.widget.PopupWindow).contentView
+                                if (cv != null && isCustomizePopup(cv)) {
+                                    hideKeyboardForCustomize(cv, module)
+                                    cv.postDelayed({ hideKeyboardForCustomize(cv, module) }, 200)
+                                }
+                            } catch (_: Throwable) {
+                            }
+                            result
+                        }
+                } catch (_: Throwable) {
+                }
+            }
+        }
+        try {
+            val dismiss = cls.getDeclaredMethod("dismiss").apply { isAccessible = true }
+            module.hook(dismiss)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept { chain ->
+                    val result = chain.proceed()
+                    try { restoreKeyboardAfterCustomize() } catch (_: Throwable) {}
+                    result
+                }
+        } catch (_: Throwable) {
+        }
+        module.log(Log.INFO, TAG, "customize toolbar popup hook installed")
     }
 
     private fun hookToolbarBackgroundColorOverride(module: XposedModule) {
@@ -369,18 +883,18 @@ internal object ImeBlurHook {
             .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
             .intercept { chain ->
                 val view = chain.thisObject as View
+                if (isCandidateProtected(view)) return@intercept chain.proceed()
                 val originalColor = chain.getArg(0) as Int
-                val earlyId = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
-                val color = if (earlyId in TRANSPARENT_BG_IDS && earlyId != MONET_BG_ID) {
+                val idName = entryName(view)
+                val color = if (idName in TRANSPARENT_BG_IDS && idName != MONET_BG_ID) {
                     0
                 } else if (originalColor == 0xff222222.toInt()) {
-                    val idName = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
-                    val replacement = globalMonetSurface(view.resources)
-                    module.log(Log.INFO, TAG, "intercepted #222222 View.setBackgroundColor id=$idName class=${view.javaClass.name}")
+                    val replacement = replacementForLegacy222(view)
+                    dlog(module) { "intercepted #222222 View.setBackgroundColor id=$idName class=${view.javaClass.name}" }
+                    if (replacement != 0) clearIfInsideBoardOnAttach(view, module)
                     replacement
                 } else originalColor
                 val result = if (color == originalColor) chain.proceed() else chain.proceed(arrayOf(color))
-                val idName = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
                 if (idName == MONET_BG_ID || idName in TRANSPARENT_BG_IDS) {
                     if (idName == MONET_BG_ID) {
                         view.background = createMonetColor(view)
@@ -388,9 +902,9 @@ internal object ImeBlurHook {
                         view.background = ColorDrawable(0x00000000)
                     }
                     if (idName == "native_candidate_bar") {
-                        module.log(Log.INFO, TAG, "kept candidate toolbar transparent over Monet body")
+                        dlog(module) { "kept candidate toolbar transparent over Monet body" }
                     }
-                    module.log(Log.INFO, TAG, "restored Monet after setBackgroundColor id=$idName")
+                    dlog(module) { "restored Monet after setBackgroundColor id=$idName" }
                 }
                 result
             }
@@ -404,10 +918,10 @@ internal object ImeBlurHook {
             .intercept { chain ->
                 val result = chain.proceed()
                 val view = chain.thisObject as View
-                val idName = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "" }
+                val idName = entryName(view)
                 if (idName == MONET_BG_ID || idName in TRANSPARENT_BG_IDS) {
                     view.background = if (idName == MONET_BG_ID) createMonetColor(view) else ColorDrawable(0x00000000)
-                    module.log(Log.INFO, TAG, "restored Monet after setBackgroundResource id=$idName")
+                    dlog(module) { "restored Monet after setBackgroundResource id=$idName" }
                 }
                 result
             }
@@ -481,7 +995,9 @@ internal object ImeBlurHook {
 
     private fun schedule(service: Any, module: XposedModule) {
         val handler = Handler(Looper.getMainLooper())
-        intArrayOf(100, 300, 700, 1200).forEach { delay ->
+        // 只在视图树刚 attach 的几个时间点兜底。原来 100/300/700/1200 四次，
+        // 每次都会重新 getIdentifier + setBackground，首次弹键盘时白白多做一轮。
+        intArrayOf(120, 400, 900).forEach { delay ->
             handler.postDelayed({ applyToKeyboardWhole(service, module) }, delay.toLong())
         }
     }
@@ -491,46 +1007,7 @@ internal object ImeBlurHook {
         hookColor(module, Resources::class.java.getDeclaredMethod("getColor", Int::class.javaPrimitiveType, Resources.Theme::class.java))
         hookColorStateList(module, Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType))
         hookColorStateList(module, Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType, Resources.Theme::class.java))
-        hookGlobalDarkGray(module)
         module.log(Log.INFO, TAG, "resource key color hooks installed")
-    }
-
-    private fun hookGlobalDarkGray(module: XposedModule) {
-        val colorMethods = listOf(
-            Resources::class.java.getDeclaredMethod("getColor", Int::class.javaPrimitiveType),
-            Resources::class.java.getDeclaredMethod("getColor", Int::class.javaPrimitiveType, Resources.Theme::class.java)
-        )
-        colorMethods.forEach { method ->
-            method.isAccessible = true
-            module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-                val value = chain.proceed() as Int
-                if (value == 0xff222222.toInt()) {
-                    val resources = chain.thisObject as Resources
-                    val name = try { resources.getResourceEntryName(chain.getArg(0) as Int) } catch (_: Throwable) { "?" }
-                    val replacement = globalMonetSurface(resources)
-                    module.log(Log.INFO, TAG, "intercepted #222222 resource=$name -> #${Integer.toHexString(replacement)}")
-                    replacement
-                } else value
-            }
-        }
-        val listMethods = listOf(
-            Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType),
-            Resources::class.java.getDeclaredMethod("getColorStateList", Int::class.javaPrimitiveType, Resources.Theme::class.java)
-        )
-        listMethods.forEach { method ->
-            method.isAccessible = true
-            module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-                val list = chain.proceed() as ColorStateList
-                if (list.defaultColor == 0xff222222.toInt()) {
-                    val resources = chain.thisObject as Resources
-                    val name = try { resources.getResourceEntryName(chain.getArg(0) as Int) } catch (_: Throwable) { "?" }
-                    val replacement = globalMonetSurface(resources)
-                    module.log(Log.INFO, TAG, "intercepted #222222 list resource=$name -> #${Integer.toHexString(replacement)}")
-                    ColorStateList.valueOf(replacement)
-                } else list
-            }
-        }
-        module.log(Log.INFO, TAG, "global #222222 probe installed")
     }
 
     private fun globalMonetSurface(resources: Resources): Int {
@@ -539,6 +1016,95 @@ internal object ImeBlurHook {
         val id = resources.getIdentifier(name, "color", "android")
         val base = if (id != 0) resources.getColor(id) else if (dark) 0xff4f5f9b.toInt() else 0xffd7e2ff.toInt()
         return withAlpha(base, 0x66)
+    }
+
+    /** “定制工具栏”浮窗：内容里有工具项网格/页码指示器。 */
+    private fun isCustomizePopup(cv: View): Boolean {
+        return try {
+            val res = cv.resources
+            listOf("gridContainer", "indicatorLayout", "item_voice_big").any { name ->
+                val id = resId(res, name)
+                id != 0 && cv.findViewById<View>(id) != null
+            }
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * 定制工具栏浮窗盖在键盘上。原生给浮窗铺不透明 #222222 面板，
+     * 我们换成 0x66 Monet 之后：下面的键盘键位会透出来（重叠），
+     * 而且浮窗 0x66 + 键盘底板 0x66 叠成双层 Monet。
+     *
+     * 处理：浮窗显示期间把键盘键位层（KeyboardView）临时隐藏、浮窗自己的面板改成透明，
+     * 只留键盘那一层 0x66 底板（含模糊）透上来 —— 单层 Monet，也看不到键位。
+     * 工具栏行（native_candidate_bar）保持可见。
+     */
+    private fun hideKeyboardForCustomize(popupContent: View, module: XposedModule) {
+        try {
+            customizePopupVisible = true
+            // 浮窗自己别再铺一层 0x66，否则就是第二层 Monet
+            if (popupContent.background != null) popupContent.background = ColorDrawable(0x00000000)
+            // 应用进入定制态时会重建/重置 KeyboardView 的 alpha，单次设置会被盖回去，
+            // 这里用短周期的看门狗持续压住，浮窗关闭时立刻停。
+            if (customizeWatchdog == null) {
+                val r = object : Runnable {
+                    var ticks = 0
+                    override fun run() {
+                        ticks++
+                        applyCustomizeHide()
+                        if (customizePopupVisible && ticks < 100) customizeHandler.postDelayed(this, 120L)
+                    }
+                }
+                customizeWatchdog = r
+                customizeHandler.post(r)
+            }
+        } catch (t: Throwable) {
+            module.log(Log.WARN, TAG, "hide keyboard for customize failed: $t")
+        }
+    }
+
+    private fun applyCustomizeHide() {
+        try {
+            val kw = keyboardWholeRef?.get() ?: return
+            fun walk(node: View) {
+                if (node.javaClass.simpleName == "KeyboardView") node.alpha = 0f
+                if (node is ViewGroup) for (i in 0 until node.childCount) walk(node.getChildAt(i))
+            }
+            walk(kw.rootView)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun restoreKeyboardAfterCustomize() {
+        customizePopupVisible = false
+        customizeWatchdog?.let { customizeHandler.removeCallbacks(it) }
+        customizeWatchdog = null
+        try {
+            val kw = keyboardWholeRef?.get() ?: return
+            fun walk(node: View) {
+                if (node.javaClass.simpleName == "KeyboardView") node.alpha = 1f
+                if (node is ViewGroup) for (i in 0 until node.childCount) walk(node.getChildAt(i))
+            }
+            walk(kw.rootView)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private val customizeHandler = Handler(Looper.getMainLooper())
+    private var customizeWatchdog: Runnable? = null
+    private var customizePopupVisible = false
+
+    /** setBackground/setBackgroundColor 里 #222222 的统一替换策略。 */
+    private fun replacementForLegacy222(view: View): Int {
+        return when {
+            // 已经在 0x66 底板内部：清透明，避免双层
+            isOverMonetBoard(view) -> 0
+            // 其它情况（含独立浮窗）：统一 0x66 强调色。
+            // “定制工具栏”那种盖在键盘上的浮窗，会由 hookCustomizePopup 临时把键盘隐藏，
+            // 只留它自己这一层，从而不出现双层 Monet。
+            else -> globalMonetSurface(view.resources)
+        }
     }
 
     private fun hookKeyboardViewFillRect(module: XposedModule, loader: ClassLoader) {
@@ -707,64 +1273,12 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "long-press bubble hooks resolved")
     }
 
-    private fun hookAnimatedStatusBackground(module: XposedModule, loader: ClassLoader) {
-        val status = loader.loadClass("com.bytedance.common_biz.ui.widget.ImeAnimatedStatusView")
-        val method = status.getDeclaredMethod("c", status, CharSequence::class.java, Boolean::class.javaPrimitiveType, Long::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Integer::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(method)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                val view = chain.getArg(0) as View
-                view.background = ColorDrawable(0x00000000)
-                module.log(Log.INFO, TAG, "kept animated status background transparent")
-                result
-            }
-        module.log(Log.INFO, TAG, "animated status background hook installed")
-    }
-
-    private fun hookAsrStatusSurface(module: XposedModule, loader: ClassLoader) {
-        val asr = loader.loadClass("com.bytedance.android.input.speech.view.AsrWaveView")
-        val method = asr.getDeclaredMethod("g", String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, String::class.java, Float::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(method)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                val view = chain.thisObject as View
-                view.background = ColorDrawable(0x00000000)
-                var parent = view.parent as? View
-                while (parent != null) {
-                    parent.background = ColorDrawable(0x00000000)
-                    val parentId = try { parent.resources.getResourceEntryName(parent.id) } catch (_: Throwable) { "" }
-                    if (parentId == "native_candidate_bar" || parentId == "keyboard_whole") break
-                    parent = parent.parent as? View
-                }
-                module.log(Log.INFO, TAG, "kept ASR status surface transparent")
-                result
-            }
-        module.log(Log.INFO, TAG, "ASR status surface hook installed")
-    }
-
-    private fun hookInputViewAsrStatus(module: XposedModule, loader: ClassLoader) {
-        val rootClass = loader.loadClass("com.bytedance.android.input.keyboard.areacontrol.InputViewRoot")
-        val method = rootClass.getDeclaredMethod("r2", String::class.java, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, Boolean::class.javaPrimitiveType, String::class.java, Float::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(method)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                val root = chain.thisObject as View
-                val native = rootClass.getDeclaredField("E").apply { isAccessible = true }.get(chain.thisObject) as? View
-                native?.background = ColorDrawable(0x00000000)
-                module.log(Log.INFO, TAG, "restored ASR toolbar transparency after r2")
-                result
-            }
-        module.log(Log.INFO, TAG, "InputViewRoot ASR status hook installed")
-    }
-
     /**
      * 第一个候选字的背景改成系统强调色。
      *
-     * 1.5.3 的选中态方法 b(I)：index==1 时用 ContextCompat.getDrawable
+     * 1.5.6 的选中态方法仍是 b(I)：index==1 时用 ContextCompat.getDrawable
      * (bg_candidate_item_highlighted) 设背景，深色模式下该 drawable 是品牌蓝 #cc4f84ff。
+     * 1.5.3 里那三个直接写死 r2/c/g 的 ASR/状态栏 hook 在 1.5.6 已不存在，已删除。
      *
      * 关键：不能用 view.background = ...，那会重入被 hook 的 View.setBackground，
      * 造成递归并最终把强调色刷满整屏。这里只给现有 drawable 加 tint。
@@ -799,28 +1313,6 @@ internal object ImeBlurHook {
         module.log(Log.INFO, TAG, "candidate #1 accent hook installed via ${method.name}")
     }
 
-    private fun hookToolbarPageBlur(module: XposedModule, loader: ClassLoader) {
-        val adapter = loader.loadClass("com.bytedance.android.input.keyboard.CustomToolbar.ToolbarPagerAdapter")
-        val holder = loader.loadClass("androidx.recyclerview.widget.RecyclerView\$ViewHolder")
-        val method = adapter.getDeclaredMethod("onCreateViewHolder", ViewGroup::class.java, Int::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(method).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-            val result = chain.proceed()
-            val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(result) as? View
-            if (itemView != null) itemView.post { applyToolbarPageSurface(itemView, module) }
-            result
-        }
-        val bind = adapter.getDeclaredMethod("onBindViewHolder", holder, Int::class.javaPrimitiveType).apply { isAccessible = true }
-        module.hook(bind).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).intercept { chain ->
-            val result = chain.proceed()
-            val itemView = holder.getDeclaredField("itemView").apply { isAccessible = true }.get(chain.getArg(0)) as? View
-            if (itemView != null) itemView.post { applyToolbarPageSurface(itemView, module) }
-            result
-        }
-        module.log(Log.INFO, TAG, "ToolbarPagerAdapter bind blur hook installed")
-    }
-
-
-
     private fun scheduleToolbarRefresh(view: View, module: XposedModule) {
         var parent = view.parent as? View
         while (parent != null && parent.parent != null) {
@@ -829,7 +1321,7 @@ internal object ImeBlurHook {
             parent = parent.parent as? View
         }
         if (parent == null) return
-        longArrayOf(0L, 50L, 200L, 500L).forEach { delay ->
+        longArrayOf(0L, 120L, 600L).forEach { delay ->
             parent.postDelayed({ applyToolbarPageSurface(parent, module) }, delay)
         }
     }
@@ -951,10 +1443,12 @@ internal object ImeBlurHook {
             val bg = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
                 cornerRadius = bar.resources.displayMetrics.density * 20f
-                setColor(withAlpha(base, 0x66))
+                // 底板已经是 0x66 Monet，这里再给 0x66 就是实打实的第二层，
+                // 所以只留一层很淡的强调色做分割（0x26），叠起来也不会发深。
+                setColor(withAlpha(base, 0x26))
             }
             bar.background = bg
-            module.log(Log.INFO, TAG, "segmented bar surface dark=$dark")
+            dlog(module) { "segmented bar surface dark=$dark" }
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "segmented bar surface failed: $t")
         }
@@ -1002,7 +1496,7 @@ internal object ImeBlurHook {
             // 删除键：底色和图标都换成强调色
             val delId = emoji.resources.getIdentifier("btn_backspace", "id", emoji.context.packageName)
             if (delId != 0) emoji.findViewById<View>(delId)?.let { tintEmojiButton(it, module) }
-            module.log(Log.INFO, TAG, "emoji surface cleared")
+            dlog(module) { "emoji surface cleared" }
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "emoji surface failed: $t")
         }
@@ -1031,7 +1525,7 @@ internal object ImeBlurHook {
             } catch (_: Throwable) {
             }
         }
-        if (killed > 0) Log.i(TAG, "tab bar background source killed n=$killed")
+        if (killed > 0) dlog(module) { "tab bar background source killed n=$killed" }
         for (i in 0 until tabBar.childCount) {
             clearTabItemBackground(tabBar.getChildAt(i))
         }
@@ -1039,7 +1533,7 @@ internal object ImeBlurHook {
         tabBar.post {
             var n = 0
             for (i in 0 until tabBar.childCount) n += clearTabItemBackground(tabBar.getChildAt(i))
-            if (n > 0) module.log(Log.INFO, TAG, "tab selector tinted n=$n")
+            if (n > 0) dlog(module) { "tab selector tinted n=$n" }
         }
     }
 
@@ -1094,7 +1588,7 @@ internal object ImeBlurHook {
             }
             if (view is android.widget.ImageView) view.imageTintList = ColorStateList.valueOf(base)
             val name = try { view.resources.getResourceEntryName(view.id) } catch (_: Throwable) { "?" }
-            module.log(Log.INFO, TAG, "emoji button tinted #$name -> #" + Integer.toHexString(base))
+            dlog(module) { "emoji button tinted #$name -> #" + Integer.toHexString(base) }
         } catch (t: Throwable) {
             module.log(Log.WARN, TAG, "emoji button tint failed: $t")
         }
@@ -1161,6 +1655,10 @@ internal object ImeBlurHook {
             }
             if (show && targetClass == HookPoints.TOOLBOX) applyToolboxSurface(target, module)
             if (show && targetClass == HookPoints.EMOJI_LAYOUT) applyEmojiSurface(target, module)
+            // 浮层进出会重新 inflate 候选/工具栏那一行，补清它的不透明底色
+            for (delay in longArrayOf(0L, 120L, 400L)) {
+                (root as? View)?.postDelayed({ clearCandidateBarSurface(container, module) }, delay)
+            }
             module.log(
                 Log.INFO, TAG,
                 "$tag isolate show=$show container=${container.childCount} touched=$count hidden=${hiddenByTag[tag]?.size ?: 0}"
@@ -1224,24 +1722,6 @@ internal object ImeBlurHook {
         return null
     }
 
-    private fun hookToolboxKeyboardView(module: XposedModule, loader: ClassLoader) {
-        val method = HookFinder.method(loader, HookPoints.TOOLBOX, HookPoints.toolboxRefresh()) ?: run {
-            module.log(Log.WARN, TAG, "ToolboxKeyboardView refresh not found")
-            return
-        }
-        module.hook(method)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                applyToolboxSurface(chain.thisObject as View, module)
-                result
-            }
-        // 注意：绝不能 hook View.onAttachedToWindow —— 那对进程里每一个 View 都生效，
-        // 而 applyToolboxSurface 会给 thisObject 铺半透明强调色背景，等于把整屏染色。
-        // 只保留上面针对 ToolboxKeyboardView 自身方法的 hook。
-        module.log(Log.INFO, TAG, "ToolboxKeyboardView refresh hook installed via ${method.name}")
-    }
-
     private fun hookToolboxItemView(module: XposedModule, loader: ClassLoader) {
         val method = HookFinder.method(loader, HookPoints.TOOLBOX_ITEM, HookPoints.toolboxItemRefresh()) ?: run {
             module.log(Log.WARN, TAG, "ToolboxItemView refresh not found")
@@ -1270,7 +1750,7 @@ internal object ImeBlurHook {
         }
         val id = view.resources.getIdentifier("toolbox_item_content", "id", view.context.packageName)
         view.findViewById<View>(id)?.background = background
-        module.log(Log.INFO, TAG, "applied toolbox item surface dark=$dark")
+        dlog(module) { "applied toolbox item surface dark=$dark" }
     }
     private fun applyToolboxSurface(root: View, module: XposedModule) {
         val dark = root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
@@ -1291,24 +1771,7 @@ internal object ImeBlurHook {
             val id = root.resources.getIdentifier(name, "id", packageName)
             if (id != 0) root.findViewById<View>(id)?.background = null
         }
-        module.log(Log.INFO, TAG, "kept toolbox surface transparent ${root.width}x${root.height} dark=$dark")
-    }
-
-    private fun hookPopupWindowBlur(module: XposedModule) {
-        val wm = Class.forName("android.view.WindowManagerImpl")
-        val addView = wm.getMethod("addView", View::class.java, WindowManager.LayoutParams::class.java)
-            .apply { isAccessible = true }
-        module.hook(addView)
-            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-            .intercept { chain ->
-                val result = chain.proceed()
-                val view = chain.getArg(0) as? View
-                if (view?.context?.packageName == "com.bytedance.android.doubaoime") {
-                    view.postDelayed({ applyBlurToPopupRoot(view, module) }, 80)
-                }
-                result
-            }
-        module.log(Log.INFO, TAG, "WindowManager popup blur hook installed")
+        dlog(module) { "kept toolbox surface transparent ${root.width}x${root.height} dark=$dark" }
     }
 
     private fun clearToolbarContainers(view: View) {
@@ -1318,40 +1781,12 @@ internal object ImeBlurHook {
     }
 
     private fun applyToolbarPageSurface(root: View, module: XposedModule) {
-        val dark = root.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
-        val suffix = if (dark) "800" else "100"
-        val raw = monetColor(root, "system_accent1_$suffix")
-        val color = if (raw == 0) {
-            if (dark) 0xff303030.toInt() else 0xfff0f0f0.toInt()
-        } else {
-            (raw and 0x00ffffff) or (0x99 shl 24)
-        }
-        val surface = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = root.resources.displayMetrics.density * 16f
-            setColor(color)
-        }
+        // 工具栏页本身已经在 keyboard_whole 的 0x66 Monet 底之上。
+        // 旧实现又铺了一层 0x99 强调色，叠起来就是用户看到的“双层 Monet”（更深一块）。
+        // 这里和 applyToolboxSurface 一样只清背景，让键盘底板透上来。
         clearToolbarContainers(root)
-        root.background = surface
-        module.log(Log.INFO, TAG, "applied toolbar Monet surface ${root.width}x${root.height} dark=$dark")
-    }
-
-    private fun applyBlurToPopupRoot(root: View, module: XposedModule) {
-        try {
-            val getViewRootImpl = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }
-            val viewRootImpl = getViewRootImpl.invoke(root.rootView) ?: return
-            val viewRootClass = Class.forName("android.view.ViewRootImpl")
-            val create = viewRootClass.getDeclaredMethod("createBackgroundBlurDrawable").apply { isAccessible = true }
-            val blur = create.invoke(viewRootImpl) as? Drawable ?: return
-            val blurClass = blur.javaClass
-            blurClass.getDeclaredMethod("setBlurRadius", Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(blur, BLUR_RADIUS)
-            blurClass.getDeclaredMethod("setCornerRadius", Float::class.javaPrimitiveType).apply { isAccessible = true }.invoke(blur, CORNER_RADIUS)
-            val monet = createMonetColor(root)
-            root.background = if (monet == null) blur else LayerDrawable(arrayOf(blur, monet))
-            module.log(Log.INFO, TAG, "installed popup blur class=${root.javaClass.name} bounds=${root.width}x${root.height}")
-        } catch (t: Throwable) {
-            module.log(Log.WARN, TAG, "popup blur skipped: $t")
-        }
+        root.background = ColorDrawable(0x00000000)
+        dlog(module) { "kept toolbar page transparent ${root.width}x${root.height}" }
     }
 
     private fun monetPopupColor(original: Int, resources: Resources): Int {
@@ -1544,7 +1979,7 @@ internal object ImeBlurHook {
     }
 
     private fun clearOverlayBackground(decor: View, name: String) {
-        val id = decor.resources.getIdentifier(name, "id", "com.bytedance.android.doubaoime")
+        val id = resId(decor.resources, name)
         val view = if (id == 0) null else decor.findViewById<View>(id)
         view?.background = ColorDrawable(0x00000000)
     }
@@ -1580,19 +2015,21 @@ internal object ImeBlurHook {
             val dialog = getWindow.invoke(service) as? Dialog ?: return
             val window: Window = dialog.window ?: return
             val decor = window.decorView
-            val id = decor.resources.getIdentifier("keyboard_whole", "id", "com.bytedance.android.doubaoime")
+            val id = resId(decor.resources, "keyboard_whole")
             val keyboardWhole = decor.findViewById<View>(id) ?: run {
-                module.log(Log.WARN, TAG, "keyboard_whole not attached yet, id=$id")
+                dlog(module) { "keyboard_whole not attached yet, id=$id" }
                 return
             }
+            keyboardWholeRef = java.lang.ref.WeakReference(keyboardWhole)
             clearOverlayBackground(decor, "native_candidate_bar")
             clearOverlayBackground(decor, "keyboard_main_container_area")
             clearOverlayBackground(decor, "keyboard_whole_llm")
             clearOverlayBackground(decor, "input_view_image_bg")
             val monet = createMonetColor(decor)
             // keyboardWhole.background = monet  // 测试：禁用 Monet 染色
-            val toolbarId = decor.resources.getIdentifier("native_candidate_bar", "id", "com.bytedance.android.doubaoime")
+            val toolbarId = resId(decor.resources, "native_candidate_bar")
             if (toolbarId != 0) decor.findViewById<View>(toolbarId)?.background = ColorDrawable(0x00000000)
+            clearCandidateBarSurface(decor, module)
             applyKeyboardWholeBlur(keyboardWhole, decor, module)
             keyboardWholeBlurred = true
             module.log(Log.INFO, TAG, "applied Monet keyboard and candidate toolbar with keyboard blur")
@@ -1608,7 +2045,7 @@ internal object ImeBlurHook {
         try {
             val getViewRootImpl = View::class.java.getDeclaredMethod("getViewRootImpl").apply { isAccessible = true }
             val viewRootImpl = getViewRootImpl.invoke(decor.rootView) ?: run {
-                module.log(Log.WARN, TAG, "keyboard blur: no view root yet")
+                dlog(module) { "keyboard blur: no view root yet" }
                 return
             }
             val viewRootClass = Class.forName("android.view.ViewRootImpl")

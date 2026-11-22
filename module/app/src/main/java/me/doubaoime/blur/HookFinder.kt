@@ -27,9 +27,10 @@ internal object HookFinder {
         if (bridge?.isValid == true) return
         try {
             loadNativeLib()
+            val t0 = android.os.SystemClock.elapsedRealtime()
             val b = DexKitBridge.create(apkPath)
             bridge = b
-            Log.i(TAG, "DexKit ready")
+            Log.i(TAG, "DexKit ready in ${android.os.SystemClock.elapsedRealtime() - t0}ms")
         } catch (t: Throwable) {
             Log.w(TAG, "DexKit init failed: $t")
         }
@@ -78,13 +79,28 @@ internal object HookFinder {
     fun method(loader: ClassLoader, className: String, matcher: MethodMatcher): Method? {
         val b = bridge ?: return null
         return try {
-            val found = b.findMethod(
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            val matches = b.findMethod(
                 FindMethod().searchPackages("com.bytedance")
                     .matcher(matcher.declaredClass(className))
-            ).firstOrNull { it.methodName != "<init>" && it.methodName != "<clinit>" } ?: run {
+            ).filter { it.methodName != "<init>" && it.methodName != "<clinit>" }
+            val cost = android.os.SystemClock.elapsedRealtime() - t0
+            if (cost > 50) Log.i(TAG, "findMethod $className took ${cost}ms")
+            if (matches.isEmpty()) {
                 Log.w(TAG, "no match in $className")
                 return null
             }
+            if (matches.size > 1) {
+                // 结构指纹太宽时，firstOrNull 可能挂到 setter 之类的方法上。
+                // 这里把全部候选打出来，方便下一次版本升级收紧 matcher。
+                Log.w(
+                    TAG,
+                    "ambiguous match in $className: " + matches.joinToString {
+                        "${it.methodName}(${it.paramTypeNames.joinToString(",")})"
+                    }
+                )
+            }
+            val found = matches.first()
             val clazz = Class.forName(className, false, loader)
             clazz.getDeclaredMethod(found.methodName, *paramClasses(loader, found.paramTypeNames))
                 .apply { isAccessible = true }
